@@ -23,6 +23,7 @@ import csv
 import datetime as dt
 import functools
 import os
+import re
 import sys
 import xmlrpc.client
 from collections import defaultdict
@@ -57,10 +58,11 @@ SAFE_BUILTINS['__import__'] = _import
 def rule_source(structure):
     with open(RULE_FILE, encoding='utf-8') as f:
         code = f.read()
-    marker = "STRUCTURE = 'IQD'"
-    if code.count(marker) != 1:
-        sys.exit('لازم يكون %r مرة وحدة بالضبط بـ %s' % (marker, RULE_FILE))
-    code = code.replace(marker, "STRUCTURE = '%s'" % structure)
+    # بس سطر الكود (أول السطر)، مو التعليق اللي بالرأس
+    marker = re.compile(r"^STRUCTURE = 'IQD'", re.M)
+    if len(marker.findall(code)) != 1:
+        sys.exit("لازم يكون سطر STRUCTURE = 'IQD' مرة وحدة بالضبط بـ %s" % RULE_FILE)
+    code = marker.sub("STRUCTURE = '%s'" % structure, code)
     compile(code, 'ABSENCE', 'exec')
     return code
 
