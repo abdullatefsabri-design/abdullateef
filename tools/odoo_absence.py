@@ -114,18 +114,23 @@ class Odoo:
         return self._fields[model]
 
     def has_model(self, model):
-        return bool(self.call('ir.model', 'search_count', [('model', '=', model)]))
+        # ir.model ينقرا بس لمدير الصلاحيات، و fields_get ما يحتاج صلاحية
+        try:
+            self.fields(model)
+        except xmlrpc.client.Fault:
+            return False
+        return True
+
+    def has_group(self, xmlid):
+        # ir.model.data ينقرا بس لمدير الصلاحيات، و has_group مسموح للمستخدم على نفسه.
+        # بأودو 18 دالة على السجل، وبـ 17 @api.model
+        try:
+            return self.call('res.users', 'has_group', [self.uid], xmlid)
+        except xmlrpc.client.Fault:
+            return self.call('res.users', 'has_group', xmlid)
 
     def missing_groups(self, xmlids=SUDO_GROUPS):
-        mine = set(self.call('res.users', 'read', [self.uid], ['groups_id'])[0]['groups_id'])
-        missing = []
-        for xmlid in xmlids:
-            module, name = xmlid.split('.')
-            rows = self.call('ir.model.data', 'search_read', [
-                ('module', '=', module), ('name', '=', name), ('model', '=', 'res.groups')], fields=['res_id'])
-            if rows and rows[0]['res_id'] not in mine:
-                missing.append(xmlid)
-        return missing
+        return [x for x in xmlids if not self.has_group(x)]
 
 
 # ------------------------------------------- ORM مصغّر حتى يشتغل نص القاعدة نفسه
@@ -496,7 +501,10 @@ def cmd_compare(odoo, month):
         row['old_line'] = round(old, 2)
         try:
             ld = localdict(env, slip['id'], rule)
-            ok = condition_ok(rule, ld)
+            try:   # الشرط للمعلومة بس (apply يشيله)، فخطأ بيه ما يضيّع المبلغ الجديد
+                ok = condition_ok(rule, ld)
+            except Exception:   # noqa: BLE001
+                ok = None
             row['condition_now'] = {True: 'يتحقق', False: 'ما يتحقق', None: '؟'}[ok]
             if ok is False:
                 blocked += 1
@@ -548,15 +556,18 @@ def cmd_apply(odoo, yes, clear_condition):
     rules = read_rules(odoo)
     stamp = dt.datetime.now().strftime('%Y%m%d_%H%M%S')
     print('السيرفر: %s | قاعدة البيانات: %s' % (odoo.url, odoo.db))
+    # الشروط تنفحص قبل أي كتابة، حتى ما تنكتب قاعدة وحدة وتوكف الثانية
+    conditioned = [rid for rid in RULES if (rules[rid].get('condition_select') or 'none') != 'none']
+    for rid in conditioned:
+        print('%s: بيها شرط %s: %s' % (rid, rules[rid]['condition_select'],
+                                       rules[rid].get('condition_python') or rules[rid].get('condition_range')))
+    if conditioned and not clear_condition:
+        sys.exit('ما انكتب شي. القاعدة الجديدة تحسب كلشي بروحها وترجّع صفر إذا ماكو غياب، والشرط القديم '
+                 'ممكن يمنعها تشتغل. شغّل apply --yes --clear-condition حتى يصير Always True.')
     for rid, structure in RULES.items():
         rule, new = rules[rid], rule_source(structure)
         values = {'amount_select': 'code', 'amount_python_compute': new}
-        kind = rule.get('condition_select') or 'none'
-        if kind != 'none':
-            print('%s: بيها شرط %s: %s' % (rid, kind, rule.get('condition_python') or rule.get('condition_range')))
-            if not clear_condition:
-                sys.exit('   القاعدة الجديدة تحسب كلشي بروحها وترجّع صفر إذا ماكو غياب، والشرط القديم ممكن '
-                         'يمنعها تشتغل. شغّل apply --yes --clear-condition حتى يصير Always True.')
+        if rid in conditioned:
             values['condition_select'] = 'none'
         if all(rule.get(k) == v for k, v in values.items()):
             print('%s (%s): نفس الكود الجديد، ما يحتاج' % (rid, structure))

@@ -19,9 +19,11 @@
 #    - بيه ساعات غياب ≥ 6 بسجلات العمل. يوم الشفت = توقيت بغداد ناقص 7 ساعات، يعني أي شي
 #      يبدي 00:00–07:00 يتبع اليوم اللي قبله (ذيل الشفت الليلي؛ ماكو شفت يبدي قبل 07:00).
 #      والجمعة لها قاعدة FRIDAY
-#    - وما عنده حضور مجموعه ≥ 6 ساعات بنفس اليوم (= بدّل شفت، مو غايب)
+#    - وما عنده حضور مجموعه ≥ 6 ساعات بنفس يوم الشفت (= بدّل شفت، مو غايب). سجل الحضور
+#      يتبع يوم الشفت من منتصفه
 #    - وما عنده بصمتين بالجهاز بيناتهن 6–16 ساعة حول الشفت (= خطأ ترتيب بصمات).
-#      البصمة اللي داخل سجل حضور كامل لشفت ثاني ما تنحسب، والبصمات اللي بيناتها ≤ 5 دقايق = وحدة
+#      البصمة اللي داخل سجل حضور كامل (6–16 ساعة) لشفت ثاني ما تنحسب، والبصمات اللي بيناتها
+#      ≤ 5 دقايق = وحدة
 #    - ومو بصمة وحدة من ساعة قبل الشفت لنص ساعة بعده وبدون حضور مسجّل (= نسيان بصمة،
 #      تروح لسياسة نسيان البصمة)
 #    - ومو بإجازة يوم كامل أو نص يوم تتقاطع ويه ساعات الغياب
@@ -98,10 +100,12 @@ if pg and pg.absence_policy_id and EXEMPT_TAG not in emp.category_ids.mapped('na
                 ('check_in', '<=', str(to_date(end + 2)))]):
             if a.in_mode != 'technical':
                 check_ins.append(a.check_in)
-            if a.check_out and (a.worked_hours or 0.0) >= WORK_MIN:
+            # سجل كامل (6–16 ساعة) = شفت حقيقي. أطول من 16 = بصمات انرتبت غلط، مو شفت ثاني
+            if a.check_out and WORK_MIN <= (a.worked_hours or 0.0) <= WORK_MAX:
                 full.append((a.check_in, a.check_out))
             if 0 < (a.worked_hours or 0.0) <= WORK_MAX:
-                d = a.check_in.toordinal() + (1 if a.check_in.hour >= 21 else 0)
+                # الحضور ينحسب ليوم الشفت من منتصف السجل (نفس قاعدة ناقص 7 ساعات)
+                d = (a.check_in + (a.check_out - a.check_in) / 2 - 4 * one_hour).toordinal()
                 worked[d] = worked.get(d, 0.0) + a.worked_hours
 
         # العطل الرسمية: Global Time Off (بدون موظف)، للكل أو لتقويم الموظف
@@ -159,7 +163,9 @@ if pg and pg.absence_policy_id and EXEMPT_TAG not in emp.category_ids.mapped('na
                 for f in full:
                     if f[0] <= c <= f[1]:
                         inside = True
-                if b0 - 5 * one_hour <= c <= b1 and not inside:
+                # من 06:00 بغداد بيوم الشفت أو 5 ساعات قبل أول غياب: إذا أودو أرشف ساعات الزمنية،
+                # أول غياب يبدي بعدها، والوصول يكون قبلها
+                if min(b0 - 5 * one_hour, b0.fromordinal(o) + 3 * one_hour) <= c <= b1 and not inside:
                     arrivals.append(c)
             on_leave = False
             lost = hours[o]
