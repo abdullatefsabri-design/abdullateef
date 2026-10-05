@@ -6,13 +6,17 @@
 #                                                              الشهر ويقارنها ويه سطر ABSENCE الحالي
 #   python3 tools/odoo_absence.py apply                       يعرض شنو راح يتغيّر بدون ما يكتب
 #   python3 tools/odoo_absence.py apply --yes                 نسخة احتياطية من 37 و 57 ← يكتب الكود الجديد
-#   python3 tools/odoo_absence.py restore FILE RULE_ID --yes  يرجّع كود قاعدة من نسخة احتياطية
+#         [--clear-condition]                                 إذا القاعدة بيها شرط (Condition) يخلّيه Always True
+#   python3 tools/odoo_absence.py restore FILE.json RULE_ID --yes  يرجّع القاعدة من نسخة احتياطية
 #
 # متغيرات البيئة:
 #   ODOO_URL      (افتراضي https://brk.ejaferp.com)
 #   ODOO_DB       (إذا السيرفر بيه قاعدة بيانات وحدة يلكاها بروحه)
 #   ODOO_LOGIN    اسم الدخول
 #   ODOO_API_KEY  مفتاح API (التفضيلات ← أمان الحساب ← New API Key)، وله نفس صلاحيات المستخدم
+#
+# المستخدم لازم يكون مدير حضور ومسؤول إجازات على الأقل: القاعدة بأودو تبحث بـ sudo()، وعبر XML-RPC
+# صلاحيات المستخدم تنطبق، فإذا ناقصة يختفي حضور وإجازات بدون أي خطأ. compare يوكف إذا ناقصة.
 #
 # compare يشغّل نفس نص salary_rules/absence.py على بيانات اللايف (قراءة بس): كل payslip.env[...].search
 # وكل حقل يقراه يروح طلب XML-RPC، فما أكو نسخة ثانية من المنطق تختلف عن القاعدة.
@@ -22,6 +26,7 @@ import builtins
 import csv
 import datetime as dt
 import functools
+import json
 import os
 import re
 import sys
@@ -35,6 +40,10 @@ BACKUP_DIR = os.path.join(ROOT, 'salary_rules', 'backup')
 REPORT_DIR = os.path.join(ROOT, 'reports')
 RULES = {37: 'IQD', 57: 'USD'}   # rule id ← قيمة STRUCTURE
 RULE_CODE = 'ABSENCE'
+COND_FIELDS = ('condition_select', 'condition_python', 'condition_range',
+               'condition_range_min', 'condition_range_max')
+# المجموعات اللي تخلّي بحث XML-RPC يشوف نفس اللي تشوفه القاعدة بـ sudo()
+SUDO_GROUPS = ('hr_attendance.group_hr_attendance_manager', 'hr_holidays.group_hr_holidays_user')
 RELATIONAL = ('many2one', 'one2many', 'many2many')
 
 # نفس builtins اللي يسمح بيها safe_eval مال أودو
@@ -106,6 +115,17 @@ class Odoo:
 
     def has_model(self, model):
         return bool(self.call('ir.model', 'search_count', [('model', '=', model)]))
+
+    def missing_groups(self, xmlids=SUDO_GROUPS):
+        mine = set(self.call('res.users', 'read', [self.uid], ['groups_id'])[0]['groups_id'])
+        missing = []
+        for xmlid in xmlids:
+            module, name = xmlid.split('.')
+            rows = self.call('ir.model.data', 'search_read', [
+                ('module', '=', module), ('name', '=', name), ('model', '=', 'res.groups')], fields=['res_id'])
+            if rows and rows[0]['res_id'] not in mine:
+                missing.append(xmlid)
+        return missing
 
 
 # ------------------------------------------- ORM مصغّر حتى يشتغل نص القاعدة نفسه
@@ -254,6 +274,38 @@ def run_rule(code, ld):
     return float(ld['result'] or 0.0), ld['result_name'] or ''
 
 
+def condition_ok(rule, ld):
+    """مثل _satisfy_condition بأودو. يرجّع None إذا نوع الشرط ما نعرف نقيّمه هنا."""
+    kind = rule.get('condition_select') or 'none'
+    scope = dict(ld, result=None, __builtins__=SAFE_BUILTINS)
+    if kind == 'none':
+        return True
+    if kind == 'python':
+        exec(compile(rule.get('condition_python') or 'result = False', 'condition', 'exec'), scope)
+        return bool(scope.get('result'))
+    if kind == 'range':
+        value = eval(compile(rule.get('condition_range') or '0', 'range', 'eval'), scope)
+        return rule['condition_range_min'] <= value <= rule['condition_range_max']
+    return None
+
+
+def run_like_odoo(code, rule, ld, category_codes):
+    """إذا الإيصال بيه أكثر من سطر إدخال بنفس كود القاعدة، أودو يشغّلها مرة لكل سطر
+    (same_type_input_lines) ويضيف كل نتيجة للفئات قبل المرة الجاية، ويجمعها."""
+    lines = [line for line in ld['payslip'].input_line_ids if line.code == rule['code']]
+    if len(lines) < 2:
+        return run_rule(code, ld)
+    total, first_name = 0.0, ''
+    for line in lines:
+        ld['inputs'][rule['code']] = line
+        amount, name = run_rule(code, ld)
+        total += amount
+        for c in category_codes:
+            ld['categories'][c] += amount
+        first_name = first_name or name
+    return total, first_name
+
+
 # ---------------------------------------------------------------- الأوامر
 
 def month_range(month):
@@ -264,8 +316,10 @@ def month_range(month):
 
 
 def read_rules(odoo):
-    rows = odoo.call('hr.salary.rule', 'read', list(RULES), ['code', 'name', 'struct_id', 'sequence',
-                                                             'amount_select', 'amount_python_compute'])
+    available = odoo.fields('hr.salary.rule')
+    wanted = ['code', 'name', 'struct_id', 'sequence', 'category_id', 'amount_select', 'amount_python_compute']
+    wanted += [f for f in COND_FIELDS if f in available]
+    rows = odoo.call('hr.salary.rule', 'read', list(RULES), wanted)
     rules = {r['id']: r for r in rows}
     for rid in RULES:
         if rid not in rules:
@@ -278,6 +332,9 @@ def read_rules(odoo):
 def cmd_check(odoo, month):
     first, last = month_range(month)
     print('Odoo %s | DB %s | uid %s' % (odoo.version.get('server_version'), odoo.db, odoo.uid))
+    missing = odoo.missing_groups()
+    if missing:
+        print('✗ المستخدم ناقصته صلاحيات %s: أرقام الحضور والإجازات تحت ممكن تطلع ناقصة' % missing)
 
     print('\n== 1) قواعد ABSENCE')
     for rid, rule in read_rules(odoo).items():
@@ -287,6 +344,9 @@ def cmd_check(odoo, month):
             rule['amount_select'], len(code.splitlines())))
         if 'absence_deduction_amount' in code:
             print('     يستخدم الحقل القديم absence_deduction_amount')
+        kind = rule.get('condition_select') or 'none'
+        print('     الشرط: %s %s' % (kind, {'python': rule.get('condition_python'),
+                                           'range': rule.get('condition_range')}.get(kind, '') or ''))
     as_dict = odoo.call('hr.salary.rule', 'search_count', [('amount_python_compute', 'ilike', "inputs['")])
     as_attr = odoo.call('hr.salary.rule', 'search_count', [('amount_python_compute', 'ilike', 'inputs.')])
     print('  قواعد تكتب inputs[...] = %d، و inputs.X = %d (القاعدة الجديدة تحتاج inputs[...])' % (as_dict, as_attr))
@@ -327,7 +387,7 @@ def cmd_check(odoo, month):
         print('  lang=%s: البحث القديم يلكى %s | الاسم: %s' % (
             lang, hits or 'ولا شي ✗', ['%s (%s)' % (n['name'], n['code']) for n in names]))
     langs = odoo.call('res.users', 'search_read', [('share', '=', False)], fields=['lang'])
-    print('  لغات المستخدمين: %s' % dict(sorted(_count(u['lang'] for u in langs).items())))
+    print('  لغات المستخدمين: %s' % dict(sorted(_count(u['lang'] or 'بدون' for u in langs).items())))
 
     if zk:
         print('\n== 4) البصمات الخام hr.attendance.zk.temp')
@@ -395,6 +455,10 @@ def _count(values):
 
 def cmd_compare(odoo, month):
     first, last = month_range(month)
+    missing = odoo.missing_groups()
+    if missing:
+        sys.exit('المستخدم ناقصته صلاحيات %s. القاعدة بأودو تبحث بـ sudo()، وهنا الحضور والإجازات راح '
+                 'تختفي بدون خطأ والأرقام تطلع غلط. استخدم مفتاح API لمستخدم مدير.' % missing)
     rules = read_rules(odoo)
     by_struct = {r['struct_id'][0]: r for r in rules.values() if r['struct_id']}
     codes = {rid: rule_source(structure) for rid, structure in RULES.items()}
@@ -402,32 +466,51 @@ def cmd_compare(odoo, month):
     slips = odoo.call('hr.payslip', 'search_read', [
         ('date_from', '>=', str(first)), ('date_from', '<=', str(last)),
         ('struct_id', 'in', list(by_struct)), ('state', '!=', 'cancel')],
-        fields=['number', 'employee_id', 'struct_id', 'state'] + (['absence_deduction_amount'] if has_field else []),
+        fields=['number', 'employee_id', 'struct_id', 'state', 'line_ids'] +
+               (['absence_deduction_amount'] if has_field else []),
         order='struct_id, id')
     print('%d إيصال بـ %s' % (len(slips), month))
     env = Env(odoo)
-    rows, changed, errors = [], 0, 0
+    chains = {}
+    for rule in rules.values():   # فئة القاعدة وآباؤها: تنضاف لها النتيجة بين مرات الإدخال المتكررة
+        codes_chain, category = [], Records(env, 'hr.salary.rule.category', [rule['category_id'][0]])
+        while category:
+            codes_chain.append(category.code)
+            category = category.parent_id
+        chains[rule['id']] = codes_chain
+    rows, changed, errors, uncomputed, blocked = [], 0, 0, 0, 0
     for n, slip in enumerate(slips, 1):
         rule = by_struct[slip['struct_id'][0]]
+        row = {'payslip': slip['number'] or slip['id'], 'employee': slip['employee_id'][1],
+               'structure': RULES[rule['id']], 'state': slip['state'],
+               'old_line': '', 'old_field': slip.get('absence_deduction_amount', ''),
+               'new': '', 'diff': '', 'condition_now': '', 'new_days': ''}
+        rows.append(row)
+        if not slip['line_ids']:
+            uncomputed += 1
+            row['new_days'] = 'الإيصال مو محسوب (ما بيه أسطر)'
+            continue
         lines = odoo.call('hr.payslip.line', 'search_read',
                           [('slip_id', '=', slip['id']), ('salary_rule_id', '=', rule['id'])], fields=['total'])
         old = sum(line['total'] for line in lines)
+        row['old_line'] = round(old, 2)
         try:
-            new, name = run_rule(codes[rule['id']], localdict(env, slip['id'], rule))
+            ld = localdict(env, slip['id'], rule)
+            ok = condition_ok(rule, ld)
+            row['condition_now'] = {True: 'يتحقق', False: 'ما يتحقق', None: '؟'}[ok]
+            if ok is False:
+                blocked += 1
+            new, name = run_like_odoo(codes[rule['id']], rule, ld, chains[rule['id']])
         except Exception as e:   # noqa: BLE001 — نكمل باقي الإيصالات ونسجّل الخطأ
             new, name, errors = None, 'خطأ: %s: %s' % (type(e).__name__, e), errors + 1
         diff = None if new is None else round(new - old, 2)
         if diff:
             changed += 1
-        rows.append({
-            'payslip': slip['number'] or slip['id'], 'employee': slip['employee_id'][1],
-            'structure': RULES[rule['id']], 'state': slip['state'],
-            'old_line': round(old, 2), 'old_field': slip.get('absence_deduction_amount', ''),
-            'new': '' if new is None else round(new, 2), 'diff': '' if diff is None else diff, 'new_days': name,
-        })
+        row.update({'new': '' if new is None else round(new, 2), 'diff': '' if diff is None else diff,
+                    'new_days': name})
         if diff or new is None:
             print('  %-14s %-35s قديم %12.2f ← جديد %12s | %s' % (
-                rows[-1]['payslip'], rows[-1]['employee'][:35], old, rows[-1]['new'], name))
+                row['payslip'], row['employee'][:35], old, row['new'], name))
         if n % 50 == 0:
             print('  … %d/%d' % (n, len(slips)))
     os.makedirs(REPORT_DIR, exist_ok=True)
@@ -436,15 +519,46 @@ def cmd_compare(odoo, month):
         writer = csv.DictWriter(f, fieldnames=list(rows[0]) if rows else ['payslip'])
         writer.writeheader()
         writer.writerows(rows)
-    print('\nتغيّر %d من %d | أخطاء %d | التفاصيل: %s' % (changed, len(slips), errors, path))
+    print('\nتغيّر %d من %d | أخطاء %d | مو محسوبة %d | التفاصيل: %s' % (
+        changed, len(slips), errors, uncomputed, path))
+    if blocked:
+        print('✗ شرط القاعدة الحالي ما يتحقق بـ %d إيصال: بهذني القاعدة ما تشتغل أصلاً إلا إذا '
+              'انشال الشرط (apply --clear-condition). عمود condition_now بالملف.' % blocked)
 
 
-def cmd_apply(odoo, yes):
+def save_backup(rule, stamp):
+    """كل اللي يحتاجه الرجوع: نوع المبلغ والكود والشرط، ويه رقم القاعدة حتى restore يتأكد منه."""
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    path = os.path.join(BACKUP_DIR, 'rule_%s_%s.json' % (rule['id'], stamp))
+    values = {f: rule[f] for f in ('amount_select', 'amount_python_compute') + COND_FIELDS if f in rule}
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump({'rule_id': rule['id'], 'code': rule['code'], 'saved_at': stamp,
+                   'structure': rule['struct_id'] and rule['struct_id'][1], 'values': values},
+                  f, ensure_ascii=False, indent=1)
+    return path
+
+
+def write_and_verify(odoo, rid, values):
+    odoo.call('hr.salary.rule', 'write', [rid], values)
+    back = odoo.call('hr.salary.rule', 'read', [rid], list(values))[0]
+    return all(back[k] == v for k, v in values.items())
+
+
+def cmd_apply(odoo, yes, clear_condition):
     rules = read_rules(odoo)
     stamp = dt.datetime.now().strftime('%Y%m%d_%H%M%S')
+    print('السيرفر: %s | قاعدة البيانات: %s' % (odoo.url, odoo.db))
     for rid, structure in RULES.items():
         rule, new = rules[rid], rule_source(structure)
-        if rule['amount_select'] == 'code' and rule['amount_python_compute'] == new:
+        values = {'amount_select': 'code', 'amount_python_compute': new}
+        kind = rule.get('condition_select') or 'none'
+        if kind != 'none':
+            print('%s: بيها شرط %s: %s' % (rid, kind, rule.get('condition_python') or rule.get('condition_range')))
+            if not clear_condition:
+                sys.exit('   القاعدة الجديدة تحسب كلشي بروحها وترجّع صفر إذا ماكو غياب، والشرط القديم ممكن '
+                         'يمنعها تشتغل. شغّل apply --yes --clear-condition حتى يصير Always True.')
+            values['condition_select'] = 'none'
+        if all(rule.get(k) == v for k, v in values.items()):
             print('%s (%s): نفس الكود الجديد، ما يحتاج' % (rid, structure))
             continue
         print('%s %s (%s) | %s: %d سطر ← %d سطر' % (
@@ -452,32 +566,35 @@ def cmd_apply(odoo, yes):
             len((rule['amount_python_compute'] or '').splitlines()), len(new.splitlines())))
         if not yes:
             continue
-        os.makedirs(BACKUP_DIR, exist_ok=True)
-        backup = os.path.join(BACKUP_DIR, 'rule_%s_%s.py' % (rid, stamp))
-        with open(backup, 'w', encoding='utf-8') as f:
-            f.write(rule['amount_python_compute'] or '')
-        print('   نسخة احتياطية: %s (amount_select كان %s)' % (backup, rule['amount_select']))
-        odoo.call('hr.salary.rule', 'write', [rid], {'amount_select': 'code', 'amount_python_compute': new})
-        check = odoo.call('hr.salary.rule', 'read', [rid], ['amount_python_compute'])[0]
-        if check['amount_python_compute'] != new:
-            sys.exit('   ✗ الكود اللي انكتب ما يطابق، رجّعه بـ restore %s %s --yes' % (backup, rid))
+        backup = save_backup(rule, stamp)
+        print('   نسخة احتياطية: %s' % backup)
+        if not write_and_verify(odoo, rid, values):
+            sys.exit('   ✗ اللي انكتب ما يطابق، رجّعه بـ restore %s %s --yes' % (backup, rid))
         print('   ✓ انكتب')
     if not yes:
         print('\nما انكتب شي. حتى تطبّق: apply --yes')
     else:
-        print('\nالتغيير يأثر على الإيصالات اللي تنحسب بعد هسه بس؛ المؤكدة تبقى مثل ما هي.')
+        print('\nالتغيير يأثر على الإيصالات اللي تنحسب بعد هسه بس. المؤكدة تبقى مثل ما هي، والمسودات '
+              'المحسوبة قبل تبقى بالأرقام القديمة لحد ما ينضغط Compute Sheet عليها.')
 
 
 def cmd_restore(odoo, path, rid, yes):
     with open(path, encoding='utf-8') as f:
-        code = f.read()
-    rule = odoo.call('hr.salary.rule', 'read', [rid], ['code', 'name'])[0]
-    print('يرجّع %s %s من %s (%d سطر)' % (rid, rule['code'], path, len(code.splitlines())))
-    if yes:
-        odoo.call('hr.salary.rule', 'write', [rid], {'amount_python_compute': code})
-        print('✓ رجع')
-    else:
+        backup = json.load(f)
+    if rid not in RULES or backup.get('rule_id') != rid:
+        sys.exit('النسخة الاحتياطية للقاعدة %s، مو %s (المسموح %s)' % (backup.get('rule_id'), rid, list(RULES)))
+    rule = read_rules(odoo)[rid]
+    values = {k: v for k, v in backup['values'].items() if k in odoo.fields('hr.salary.rule')}
+    print('يرجّع %s %s من %s (نسخة %s، %d سطر كود)' % (
+        rid, rule['code'], path, backup.get('saved_at'), len((values.get('amount_python_compute') or '').splitlines())))
+    if not yes:
         print('ما انكتب شي. أضف --yes')
+        return
+    current = save_backup(rule, dt.datetime.now().strftime('%Y%m%d_%H%M%S'))
+    print('   نسخة من الحالي قبل الرجوع: %s' % current)
+    if not write_and_verify(odoo, rid, values):
+        sys.exit('   ✗ اللي انكتب ما يطابق النسخة الاحتياطية')
+    print('✓ رجع')
 
 
 def main():
@@ -489,6 +606,7 @@ def main():
     p.add_argument('--month', required=True)
     p = sub.add_parser('apply')
     p.add_argument('--yes', action='store_true')
+    p.add_argument('--clear-condition', action='store_true')
     p = sub.add_parser('restore')
     p.add_argument('file')
     p.add_argument('rule_id', type=int)
@@ -501,7 +619,7 @@ def main():
     elif args.cmd == 'compare':
         cmd_compare(odoo, args.month)
     elif args.cmd == 'apply':
-        cmd_apply(odoo, args.yes)
+        cmd_apply(odoo, args.yes, args.clear_condition)
     else:
         cmd_restore(odoo, args.file, args.rule_id, args.yes)
 

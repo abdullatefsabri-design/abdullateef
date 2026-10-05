@@ -2,6 +2,7 @@
 #   python3 salary_rules/test_absence.py
 # إذا odoo موجود بالـ PYTHONPATH يشغّلها بـ safe_eval مال أودو نفسه، وإلا بـ exec بنفس builtins.
 import os
+import re
 import sys
 from datetime import date, datetime, time, timedelta
 
@@ -100,14 +101,31 @@ class Env:
     def __getitem__(self, name):
         return Model(self.data.get(name, []), self.lang)
 
-def run(code, data, lang, emp, contract, structure=None, categories=None, inputs=None):  # noqa: E302
+def run(code, data, lang, emp, contract, structure=None, categories=None, inputs=None, input_lines=None):  # noqa: E302
+    """input_lines: أسطر إدخال بنفس الكود، يشغّلها مثل أودو: مرة لكل سطر ويجمع النتيجة."""
     if structure:
-        code = code.replace("STRUCTURE = 'IQD'", "STRUCTURE = '%s'" % structure)
-    payslip = Rec(env=Env(data, lang), employee_id=emp, date_from=date(2026, 10, 1), date_to=date(2026, 10, 31))
+        code = re.sub(r"^STRUCTURE = 'IQD'", "STRUCTURE = '%s'" % structure, code, flags=re.M)
+    inputs = dict(inputs or {})
+    lines = list(input_lines or [])
+    for c, line in inputs.items():
+        line.code = c
+        lines.append(line)
+    payslip = Rec(env=Env(data, lang), employee_id=emp, date_from=date(2026, 10, 1), date_to=date(2026, 10, 31),
+                  input_line_ids=RS(lines))
     ld = {'payslip': payslip, 'contract': contract, 'employee': emp,
-          'inputs': inputs or {}, 'categories': categories or {},
+          'inputs': inputs, 'categories': dict(categories or {}),
           'result': None, 'result_qty': 1.0, 'result_rate': 100, 'result_name': False}
-    safe_eval(code, ld, mode='exec', nocopy=True)
+    if not input_lines:
+        safe_eval(code, ld, mode='exec', nocopy=True)
+        return ld
+    total, names = 0.0, []
+    for line in input_lines:        # نفس حلقة same_type_input_lines بأودو (result_name ما يتصفّر)
+        ld['inputs'][line.code] = line
+        ld['result'] = None
+        safe_eval(code, ld, mode='exec', nocopy=True)
+        total += ld['result']
+        names.append(ld['result_name'])
+    ld['result'], ld['names'] = total, names
     return ld
 
 # ---------------- data ----------------
@@ -131,8 +149,8 @@ def night_abs(d, split=True):  # 19:00 -> 07:00 next day
         block(bg(2026, 10, d + 1, 0), bg(2026, 10, d + 1, 7))
     else:
         block(bg(2026, 10, d, 19), bg(2026, 10, d + 1, 7))
-def attendance(ci, co):
-    att.append(Rec(employee_id=emp, check_in=ci, check_out=co,
+def attendance(ci, co, in_mode='kiosk'):
+    att.append(Rec(employee_id=emp, check_in=ci, check_out=co, in_mode=in_mode,
                    worked_hours=(co - ci).total_seconds() / 3600 if co else False))
 def punch(t):
     zk.append(Rec(employee_id=emp, date=t))
@@ -213,4 +231,95 @@ assert run(code, data, 'en_US', emp, c2)['result'] == 0
 # العقد ينتهي 20/10
 c3 = Rec(**dict(contract.__dict__, date_end=date(2026, 10, 20)))
 assert run(code, data, 'en_US', emp, c3)['result_name'].endswith('(05/10، 19/10)')
-print('OK: كل الحالات طلعت صح')
+# أكثر من سطر إدخال ABSENCE: أودو يشغّل القاعدة مرة لكل سطر، والأيام تنخصم مرة وحدة
+r = run(code, data, 'en_US', emp, contract,
+        input_lines=[Rec(code='ABSENCE', amount=1000.0), Rec(code='ABSENCE', amount=2000.0)])
+assert abs(r['result'] - (-(5 * 1.5 * 900000 / 30) - 3000)) < 0.01, r['result']
+assert r['names'][0].endswith(EXPECTED) and r['names'][1] is False, r['names']
+
+
+# ---------------- حالات منفصلة (كل وحدة ببيانات لحالها) ----------------
+def days_for(build):
+    global we, att, zk, lv, hol
+    we, att, zk, lv, hol = [], [], [], [], []
+    build()
+    d = {'hr.work.entry': we, 'hr.attendance': att, 'hr.attendance.zk.temp': zk,
+         'hr.leave': lv, 'resource.calendar.leaves': hol}
+    m = re.search(r'\((.*)\)', run(code, d, 'en_US', emp, contract)['result_name'] or '')
+    return m.group(1) if m else ''
+
+def prev_night(d):   # داوم الشفت الليلي اللي قبل اليوم d (19:00 → 07:05)
+    attendance(bg(2026, 10, d - 1, 19), bg(2026, 10, d, 7, 5))
+    punch(bg(2026, 10, d - 1, 19)); punch(bg(2026, 10, d, 7, 5))
+
+def zam(d, h1, h2, m1=0, m2=0):
+    leave(bg(2026, 10, d, h1, m1), bg(2026, 10, d, h2, m2), date(2026, 10, d), date(2026, 10, d), hours=True)
+
+CASES = [
+    # (الحالة، البناء، الأيام المتوقعة)
+    ('بدّل من ليلي لصباحي وغاب يومين', lambda: (
+        prev_night(19), day_abs(19), day_abs(20)), '19/10، 20/10'),
+    ('يوم التبديل غايب، ودخول اليوم الثاني 08:02', lambda: (
+        prev_night(19), day_abs(19), night_abs(19),
+        attendance(bg(2026, 10, 20, 8, 2), bg(2026, 10, 20, 16)),
+        punch(bg(2026, 10, 20, 8, 2)), punch(bg(2026, 10, 20, 16))), '19/10'),
+    ('يوم التبديل غايب، ودخول اليوم الثاني 07:20', lambda: (
+        prev_night(19), day_abs(19), night_abs(19),
+        attendance(bg(2026, 10, 20, 7, 20), bg(2026, 10, 20, 16)),
+        punch(bg(2026, 10, 20, 7, 20)), punch(bg(2026, 10, 20, 16))), '19/10'),
+    ('يوم التبديل ما جا، وعنده زمنية 08–10', lambda: (
+        prev_night(19), day_abs(19), night_abs(19), punch(bg(2026, 10, 20, 7, 55)), zam(19, 8, 10)), '19/10'),
+    ('بعد الليلي وصل 14:00 وطلع 16:00', lambda: (
+        prev_night(19), block(bg(2026, 10, 19, 8), bg(2026, 10, 19, 14)),
+        punch(bg(2026, 10, 19, 14)), punch(bg(2026, 10, 19, 16)),
+        attendance(bg(2026, 10, 19, 14), bg(2026, 10, 19, 16))), '19/10'),
+    ('بعد الليلي بصماته انرتبت غلط (حضور دقيقة)', lambda: (
+        prev_night(19), day_abs(19), punch(bg(2026, 10, 19, 8)), punch(bg(2026, 10, 19, 8, 1)),
+        punch(bg(2026, 10, 19, 16, 3)), attendance(bg(2026, 10, 19, 8), bg(2026, 10, 19, 8, 1))), ''),
+    ('بعد الليلي دخل 07:50 ونسى الخروج', lambda: (
+        prev_night(19), day_abs(19), punch(bg(2026, 10, 19, 7, 50)),
+        attendance(bg(2026, 10, 19, 7, 50), False)), ''),
+    ('ضغطتين بالجهاز بفرق ثواني ونسى الخروج', lambda: (
+        day_abs(5), punch(bg(2026, 10, 5, 8, 0, 3)), punch(bg(2026, 10, 5, 8, 0, 9)),
+        attendance(bg(2026, 10, 5, 8, 0, 3), bg(2026, 10, 5, 8, 0, 9))), ''),
+    ('نسى الدخول، بصمة خروج وحدة 16:02', lambda: (
+        day_abs(5), punch(bg(2026, 10, 5, 16, 2)), attendance(bg(2026, 10, 5, 16, 2), False)), ''),
+    ('وصل متأخر 6 ساعات (14:00–16:00)', lambda: (
+        block(bg(2026, 10, 5, 8), bg(2026, 10, 5, 14)), punch(bg(2026, 10, 5, 14)), punch(bg(2026, 10, 5, 16)),
+        attendance(bg(2026, 10, 5, 14), bg(2026, 10, 5, 16))), '05/10'),
+    ('ليلي بيه استراحة نص الليل: غاب 12 وداوم 13', lambda: (
+        block(bg(2026, 10, 12, 19), bg(2026, 10, 13, 0)), block(bg(2026, 10, 13, 0, 30), bg(2026, 10, 13, 7)),
+        punch(bg(2026, 10, 13, 19)), punch(bg(2026, 10, 14, 7)),
+        attendance(bg(2026, 10, 13, 19), bg(2026, 10, 14, 7))), '12/10'),
+    ('ليلي طلع 00:30 والباقي غياب', lambda: (
+        block(bg(2026, 10, 13, 0, 30), bg(2026, 10, 13, 7)),
+        attendance(bg(2026, 10, 12, 19), bg(2026, 10, 13, 0, 30)),
+        punch(bg(2026, 10, 12, 19)), punch(bg(2026, 10, 13, 0, 30))), '12/10'),
+    ('غاب ليلة 12', lambda: night_abs(12), '12/10'),
+    ('غاب ليلة الجمعة', lambda: night_abs(16), ''),
+    ('زمنية 08–12 ببداية الدوام وما جا (أودو أرشف ساعاتها)', lambda: (
+        block(bg(2026, 10, 5, 13), bg(2026, 10, 5, 17)), zam(5, 8, 12)), '05/10'),
+    ('وصل، طلع زمنية نص ساعة وما رجع', lambda: (
+        day_abs(5), punch(bg(2026, 10, 5, 8)), punch(bg(2026, 10, 5, 8, 30)),
+        attendance(bg(2026, 10, 5, 8), bg(2026, 10, 5, 8, 30)), zam(5, 8, 9, 30, 0)), '05/10'),
+    ('زمنية بنص الدوام ورجع', lambda: (
+        block(bg(2026, 10, 5, 10), bg(2026, 10, 5, 12)),
+        attendance(bg(2026, 10, 5, 8), bg(2026, 10, 5, 10)), attendance(bg(2026, 10, 5, 12), bg(2026, 10, 5, 16)),
+        zam(5, 10, 12)), ''),
+    ('زمنية 08–10 وداوم 10–16', lambda: (
+        attendance(bg(2026, 10, 5, 10), bg(2026, 10, 5, 16)), punch(bg(2026, 10, 5, 10)), punch(bg(2026, 10, 5, 16)),
+        zam(5, 8, 10)), ''),
+    ('غاب ليلتين، وحضور تقني 00:00 وزمنية 02–06', lambda: (
+        night_abs(12), night_abs(13),
+        attendance(bg(2026, 10, 13, 0), bg(2026, 10, 13, 0, 0, 1), in_mode='technical'),
+        attendance(bg(2026, 10, 14, 0), bg(2026, 10, 14, 0, 0, 1), in_mode='technical'),
+        leave(bg(2026, 10, 13, 2), bg(2026, 10, 13, 6), date(2026, 10, 13), date(2026, 10, 13), hours=True)),
+     '12/10، 13/10'),
+]
+failed = []
+for label, build, expected in CASES:
+    got = days_for(build)
+    if got != expected:
+        failed.append('%s: المتوقع [%s] طلع [%s]' % (label, expected, got))
+assert not failed, '\n'.join(failed)
+print('OK: كل الحالات طلعت صح (%d حالة منفصلة)' % len(CASES))

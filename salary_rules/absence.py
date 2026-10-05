@@ -16,15 +16,21 @@
 #    3) أيام غياب بالإيصال بدون أي سجل غياب (543)
 #
 #  القاعدة الجديدة تحسب اليوم غياب بس إذا:
-#    - بيه ساعات غياب ≥ 6 بسجلات العمل (بتاريخ بغداد، وذيل الشفت الليلي 00:00–07:00
-#      يتبع اليوم اللي قبله)، والجمعة لها قاعدة FRIDAY
+#    - بيه ساعات غياب ≥ 6 بسجلات العمل. يوم الشفت = توقيت بغداد ناقص 7 ساعات، يعني أي شي
+#      يبدي 00:00–07:00 يتبع اليوم اللي قبله (ذيل الشفت الليلي؛ ماكو شفت يبدي قبل 07:00).
+#      والجمعة لها قاعدة FRIDAY
 #    - وما عنده حضور مجموعه ≥ 6 ساعات بنفس اليوم (= بدّل شفت، مو غايب)
-#    - وما عنده بصمتين بالجهاز بيناتهن 6–16 ساعة حول الشفت (= خطأ ترتيب بصمات)
-#    - ومو بصمة وحدة داخل وقت الشفت (= نسيان بصمة، تروح لسياسة نسيان البصمة)
-#    - ومو بإجازة (يوم كامل، أو نص يوم/زمنية تتقاطع ويه ساعات الغياب)
-#      الزمنية (4 ساعات بالشهر) ما تنحسب ببداية الدوام: تغطي بس إذا وصل الشركة قبلها
+#    - وما عنده بصمتين بالجهاز بيناتهن 6–16 ساعة حول الشفت (= خطأ ترتيب بصمات).
+#      البصمة اللي داخل سجل حضور كامل لشفت ثاني ما تنحسب، والبصمات اللي بيناتها ≤ 5 دقايق = وحدة
+#    - ومو بصمة وحدة من ساعة قبل الشفت لنص ساعة بعده وبدون حضور مسجّل (= نسيان بصمة،
+#      تروح لسياسة نسيان البصمة)
+#    - ومو بإجازة يوم كامل أو نص يوم تتقاطع ويه ساعات الغياب
+#    - الزمنية (4 ساعات بالشهر) ما تنحسب ببداية الدوام: إذا وصل الشركة قبلها تغطي ساعاتها بس،
+#      وإذا ما وصل تنحسب ساعاتها غياب. اليوم غياب إذا الباقي بعدها ≥ 6 ساعات
 #    - ومو عطلة رسمية (Global Time Off) يبدي بيها الشفت
 #    - والموظف عنده سياسة غياب بمجموعة السياسات، ومو «معفي من البصمة»
+#  وإذا الإيصال بيه أكثر من سطر إدخال ABSENCE، أودو يشغّل القاعدة مرة لكل سطر:
+#  الأيام تنخصم بأول مرة بس.
 #
 #  تجربة على بيانات أيلول (330 إيصال): يتغيّر 8 إيصالات بس، وكلها مطابقة للبصمة:
 #    84: 7 ← 5 أيام | 125، 303، 435، 543: ← صفر | 418: 3 ← 2 | 389، 403: ← صفر
@@ -65,34 +71,38 @@ if pg and pg.absence_policy_id and EXEMPT_TAG not in emp.category_ids.mapped('na
             ('state', '!=', 'cancelled'),
             ('date_start', '>=', str(to_date(start - 2))),
             ('date_start', '<=', str(to_date(end + 1)))]):
-        ds = w.date_start
-        if ds.hour == 21 and ds.minute == 0:
-            o = ds.toordinal()                               # يبدي 00:00 بغداد = ذيل شفت ليلي
-        else:
-            o = ds.toordinal() + (1 if ds.hour >= 21 else 0)  # تاريخ بغداد
+        o = (w.date_start - 4 * one_hour).toordinal()       # UTC - 4 = بغداد - 7: ذيل 00:00–07:00 لليوم اللي قبله
         if start <= o <= end and to_date(o).weekday() != 4:  # الجمعة لها قاعدة FRIDAY
             hours[o] = hours.get(o, 0.0) + (w.duration or 0.0)
             blocks.setdefault(o, []).append(w)
-    cand = sorted([o for o in hours if hours[o] >= MIN_HOURS])
+    leaves = env['hr.leave'].sudo().search([
+        ('employee_id', '=', emp.id),
+        ('state', '=', 'validate'),
+        ('request_date_from', '<=', to_date(end + 1)),
+        ('request_date_to', '>=', to_date(start - 1))])
+    zam = {}
+    for lv in leaves:
+        if lv.request_unit_hours:
+            zo = (lv.date_from - 4 * one_hour).toordinal()
+            zam[zo] = zam.get(zo, 0.0) + (lv.date_to - lv.date_from) / one_hour
+    cand = sorted([o for o in hours if hours[o] + zam.get(o, 0.0) >= MIN_HOURS])
 
     if cand:
         # 2) ساعات الحضور لكل يوم (مجموع السجلات، حتى الطلعة بالاستراحة ما تخرّب الحساب)
         worked = {}
         check_ins = []
+        full = []
         for a in env['hr.attendance'].sudo().search([
                 ('employee_id', '=', emp.id),
                 ('check_in', '>=', str(to_date(start - 2))),
                 ('check_in', '<=', str(to_date(end + 2)))]):
-            check_ins.append(a.check_in)
+            if a.in_mode != 'technical':
+                check_ins.append(a.check_in)
+            if a.check_out and (a.worked_hours or 0.0) >= WORK_MIN:
+                full.append((a.check_in, a.check_out))
             if 0 < (a.worked_hours or 0.0) <= WORK_MAX:
                 d = a.check_in.toordinal() + (1 if a.check_in.hour >= 21 else 0)
                 worked[d] = worked.get(d, 0.0) + a.worked_hours
-
-        leaves = env['hr.leave'].sudo().search([
-            ('employee_id', '=', emp.id),
-            ('state', '=', 'validate'),
-            ('request_date_from', '<=', to_date(end + 1)),
-            ('request_date_to', '>=', to_date(start - 1))])
 
         # العطل الرسمية: Global Time Off (بدون موظف)، للكل أو لتقويم الموظف
         holidays = env['resource.calendar.leaves'].sudo().search([
@@ -117,6 +127,17 @@ if pg and pg.absence_policy_id and EXEMPT_TAG not in emp.category_ids.mapped('na
                 ('employee_id', '=', emp.id),
                 ('date', '>=', b0 - 5 * one_hour),
                 ('date', '<=', b1 + one_hour)]).mapped('date')))
+            # البصمة اللي داخل سجل حضور كامل (≥ 6 ساعات) تخص شفت ثاني، مو هذا اليوم
+            own = []
+            for p in punches:
+                inside = False
+                for f in full:
+                    if f[0] <= p <= f[1]:
+                        inside = True
+                # بصمات بيناتها ≤ 5 دقايق (ضغطتين على الجهاز) = بصمة وحدة
+                if not inside and not (own and p - own[-1] <= one_hour / 12):
+                    own.append(p)
+            punches = own
             # زوج بصمات بيناتهن 6–16 ساعة. الحد الأعلى ضروري: بيوم تبديل الشفت النافذة
             # تصير ~29 ساعة، وخروج الشفت اللي قبله ويه دخول اللي بعده يبينون «دوام»
             shift_done = False
@@ -126,15 +147,31 @@ if pg and pg.absence_policy_id and EXEMPT_TAG not in emp.category_ids.mapped('na
                         shift_done = True
             if shift_done:
                 continue                                     # داوم، بس البصمات انرتبت غلط
-            if len(punches) == 1 and b0 - one_hour <= punches[0] <= b1:
+            if len(punches) == 1 and worked.get(o, 0.0) < 0.1 and \
+                    b0 - one_hour <= punches[0] <= b1 + one_hour / 2:
                 continue                                     # نسيان بصمة، مو غياب
 
             # 4) الإجازات. الزمنية (إجازة ساعية) ما تنحسب ببداية الدوام: تغطي بس إذا
             #    الموظف وصل الشركة (بصمة أو تسجيل دخول) قبل ما تبدي، وإلا اليوم غياب
-            arrivals = punches + [c for c in check_ins if b0 - 5 * one_hour <= c <= b1]
+            arrivals = list(punches)
+            for c in check_ins:
+                inside = False
+                for f in full:
+                    if f[0] <= c <= f[1]:
+                        inside = True
+                if b0 - 5 * one_hour <= c <= b1 and not inside:
+                    arrivals.append(c)
             on_leave = False
+            lost = hours[o]
             for lv in leaves:
-                if lv.request_unit_hours and not [p for p in arrivals if p < lv.date_from]:
+                if lv.request_unit_hours:
+                    ov = 0.0
+                    for w in blocks[o]:
+                        ov += max(min(lv.date_to, w.date_stop) - max(lv.date_from, w.date_start), 0 * one_hour) / one_hour
+                    if [p for p in arrivals if p < lv.date_from]:
+                        lost -= ov                           # زمنية بعد الوصول: تغطي ساعاتها بس
+                    elif (lv.date_from - 4 * one_hour).toordinal() == o:
+                        lost += (lv.date_to - lv.date_from) / one_hour - ov   # زمنية ببداية الدوام = غياب
                     continue
                 if not lv.request_unit_hours and not lv.request_unit_half and \
                         lv.request_date_from.toordinal() <= o <= lv.request_date_to.toordinal():
@@ -142,8 +179,14 @@ if pg and pg.absence_policy_id and EXEMPT_TAG not in emp.category_ids.mapped('na
                 for w in blocks[o]:
                     if lv.date_from < w.date_stop and lv.date_to > w.date_start:
                         on_leave = True
-            if not on_leave:
+            if not on_leave and lost >= MIN_HOURS:
                 days.append(o)
+
+# أودو يشغّل القاعدة مرة لكل سطر إدخال ABSENCE إذا الإيصال بيه أكثر من سطر (نفس كود القاعدة):
+# الأيام تنخصم بأول مرة بس، والمرات الباقية تخصم مبلغ سطرها
+abs_inputs = [line for line in payslip.input_line_ids if line.code == 'ABSENCE']
+if len(abs_inputs) > 1 and inputs['ABSENCE'].id != abs_inputs[0].id:
+    days = []
 
 # ---- المبلغ ----
 if STRUCTURE == 'USD':
@@ -159,6 +202,7 @@ if STRUCTURE == 'USD':
     # الخصم ما يعبر المتبقي من الراتب (الأساسي + البدلات + الخصومات اللي قبل هالقاعدة)
     available = categories['BASIC'] + categories['ALW'] + categories['DED']
     result = max(result, -max(available, 0))
+result_name = False   # أودو ما يصفّره بين المرات، فبدونه السطر الثاني ياخذ اسم الأيام
 if days:
     result_name = 'خصم الغياب: %d يوم × 1.5 (%s)' % (
         len(days), '، '.join([to_date(o).strftime('%d/%m') for o in days]))
