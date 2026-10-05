@@ -131,7 +131,7 @@ if pg and pg.absence_policy_id and EXEMPT_TAG not in emp.category_ids.mapped('na
                 ('employee_id', '=', emp.id),
                 ('date', '>=', b0 - 5 * one_hour),
                 ('date', '<=', b1 + one_hour)]).mapped('date')))
-            # البصمة اللي داخل سجل حضور كامل (≥ 6 ساعات) تخص شفت ثاني، مو هذا اليوم
+            # البصمة اللي داخل سجل حضور كامل (6–16 ساعة) تخص شفت ثاني، مو هذا اليوم
             own = []
             for p in punches:
                 inside = False
