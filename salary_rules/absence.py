@@ -87,9 +87,12 @@ if pg and pg.absence_policy_id and EXEMPT_TAG not in emp.category_ids.mapped('na
         ('state', '=', 'validate'),
         ('request_date_from', '<=', to_date(end + 1)),
         ('request_date_to', '>=', to_date(start - 1))])
-    # نوعي الزمنية بالرقم، والاسم ينقرا بالعربي والإنكليزي حتى ما يعتمد على لغة اللي يحسب الإيصال
-    zam_types = (env['hr.leave.type'].sudo().with_context(lang='ar_001').search([('name', 'in', list(ZAM_TYPES))]) |
-                 env['hr.leave.type'].sudo().with_context(lang='en_US').search([('name', 'in', list(ZAM_TYPES))])).ids
+    # نوعي الزمنية بالرقم. الاسم ينقرا بلغة اللي يحسب الإيصال وبالعربي وبالإنكليزي، لأن «الزمنية» هو نوع
+    # أودو «Extra Hours» بعد ما تسمّى بالعربي، فاسمه يختلف حسب اللغة
+    lt = env['hr.leave.type'].sudo()
+    zam_types = (lt.search([('name', 'in', list(ZAM_TYPES))]) |
+                 lt.with_context(lang='ar_001').search([('name', 'in', list(ZAM_TYPES))]) |
+                 lt.with_context(lang='en_US').search([('name', 'in', list(ZAM_TYPES))])).ids
     zam = {}
     for lv in leaves:
         if lv.request_unit_hours and lv.holiday_status_id.id in zam_types:
