@@ -130,6 +130,12 @@ def run(code, data, lang, emp, contract, structure=None, categories=None, inputs
 
 # ---------------- data ----------------
 ABS = Rec(name={'en_US': 'Absence', 'ar_001': 'غياب'})
+# أنواع الإجازات مثل BRK: الزمنية نوع أودو القياسي (اسمه الإنكليزي غير)، والاستثناءات نوع مسوّى بالعربي
+ZAM = Rec(name={'en_US': 'Extra Hours', 'ar_001': 'الزمنية'})
+ZAM_EX = Rec(name={'en_US': 'الزمنية (استثناءات)', 'ar_001': 'الزمنية (استثناءات)'})
+PAID = Rec(name={'en_US': 'Paid Time Off', 'ar_001': 'أيام الإجازة المدفوعة'})
+WORK_H = Rec(name={'en_US': 'الإجازاة الساعية (عمل)', 'ar_001': 'الإجازاة الساعية (عمل)'})
+LEAVE_TYPES = [ZAM, ZAM_EX, PAID, WORK_H]
 cal = Rec(name='Day')
 company = Rec(name='BRK')
 pg = Rec(absence_policy_id=Rec(), work_days_per_month=26)
@@ -154,10 +160,12 @@ def attendance(ci, co, in_mode='kiosk'):
                    worked_hours=(co - ci).total_seconds() / 3600 if co else False))
 def punch(t):
     zk.append(Rec(employee_id=emp, date=t))
-def leave(df, dt, rdf, rdt, hours=False, half=False):
+def leave(df, dt, rdf, rdt, hours=False, half=False, kind=None):
+    # بالساعات بدون نوع = زمنية، وغيرها = إجازة مدفوعة
     lv.append(Rec(employee_id=emp, state='validate', date_from=df, date_to=dt,
                   request_date_from=rdf, request_date_to=rdt,
-                  request_unit_hours=hours, request_unit_half=half))
+                  request_unit_hours=hours, request_unit_half=half,
+                  holiday_status_id=kind or (ZAM if hours else PAID)))
 
 # 03 Sat: public holiday (National Day) with absence entries
 day_abs(3)
@@ -204,7 +212,7 @@ block(bg(2026, 10, 28, 8), bg(2026, 10, 28, 16), state='cancelled')
 night_abs(29, split=False)
 
 data = {'hr.work.entry': we, 'hr.attendance': att, 'hr.attendance.zk.temp': zk,
-        'hr.leave': lv, 'resource.calendar.leaves': hol}
+        'hr.leave': lv, 'resource.calendar.leaves': hol, 'hr.leave.type': LEAVE_TYPES}
 
 code = open(os.path.join(HERE, 'absence.py'), encoding='utf-8').read()
 EXPECTED = '(05/10، 19/10، 21/10، 22/10، 29/10)'
@@ -244,7 +252,7 @@ def days_for(build):
     we, att, zk, lv, hol = [], [], [], [], []
     build()
     d = {'hr.work.entry': we, 'hr.attendance': att, 'hr.attendance.zk.temp': zk,
-         'hr.leave': lv, 'resource.calendar.leaves': hol}
+         'hr.leave': lv, 'resource.calendar.leaves': hol, 'hr.leave.type': LEAVE_TYPES}
     m = re.search(r'\((.*)\)', run(code, d, 'en_US', emp, contract)['result_name'] or '')
     return m.group(1) if m else ''
 
@@ -252,8 +260,8 @@ def prev_night(d):   # داوم الشفت الليلي اللي قبل اليو
     attendance(bg(2026, 10, d - 1, 19), bg(2026, 10, d, 7, 5))
     punch(bg(2026, 10, d - 1, 19)); punch(bg(2026, 10, d, 7, 5))
 
-def zam(d, h1, h2, m1=0, m2=0):
-    leave(bg(2026, 10, d, h1, m1), bg(2026, 10, d, h2, m2), date(2026, 10, d), date(2026, 10, d), hours=True)
+def zam(d, h1, h2, m1=0, m2=0, kind=None):
+    leave(bg(2026, 10, d, h1, m1), bg(2026, 10, d, h2, m2), date(2026, 10, d), date(2026, 10, d), hours=True, kind=kind)
 
 def parity(ts):
     """حضور مبني من البصمات بالتناوب دخول/خروج، مثل الجهاز: ضغطتين = سجل صفر، وبعدها كلشي ينقلب."""
@@ -412,6 +420,25 @@ CASES = [
         block(bg(2026, 10, 4, 11), bg(2026, 10, 4, 15)),
         attendance(bg(2026, 10, 5, 5, 50), bg(2026, 10, 5, 8)), punch(bg(2026, 10, 5, 5, 50)), punch(bg(2026, 10, 5, 8)),
         block(bg(2026, 10, 5, 8), bg(2026, 10, 5, 15))), '05/10'),
+    # حالات طلعت من بيانات أيلول الحقيقية (154 و 303) ومن السجلات المكررة
+    ('شفت 04:00: داوم الثلاثاء والخميس وغاب الأربعاء 21', lambda: (
+        attendance(bg(2026, 10, 20, 3, 36), bg(2026, 10, 20, 12, 4)), punch(bg(2026, 10, 20, 3, 36)), punch(bg(2026, 10, 20, 12, 4)),
+        block(bg(2026, 10, 21, 4), bg(2026, 10, 21, 12)),
+        attendance(bg(2026, 10, 22, 3, 38), bg(2026, 10, 22, 12, 5)), punch(bg(2026, 10, 22, 3, 38)), punch(bg(2026, 10, 22, 12, 5))),
+     '21/10'),
+    ('تبديل من ليلي لصباحي الثلاثاء 13، وإجازة مدفوعة بالساعات 24 ساعة على ليلته', lambda: (
+        attendance(bg(2026, 10, 12, 22, 52), bg(2026, 10, 13, 7, 8)), punch(bg(2026, 10, 12, 22, 52)), punch(bg(2026, 10, 13, 7, 8)),
+        block(bg(2026, 10, 13, 9, 42), bg(2026, 10, 13, 15)), block(bg(2026, 10, 13, 23), bg(2026, 10, 13, 23, 59)),
+        leave(bg(2026, 10, 13, 23), bg(2026, 10, 14, 23), date(2026, 10, 13), date(2026, 10, 14), hours=True, kind=PAID)), ''),
+    ('ما جا، وعنده زمنية (استثناءات) 08–10', lambda: (
+        day_abs(5), zam(5, 8, 10, kind=ZAM_EX)), '05/10'),
+    ('غياب ساعتين مكرر 3 مرات (conflict)', lambda: (
+        block(bg(2026, 10, 5, 8), bg(2026, 10, 5, 10)), block(bg(2026, 10, 5, 8), bg(2026, 10, 5, 10)),
+        block(bg(2026, 10, 5, 8), bg(2026, 10, 5, 10))), ''),
+    ('ليلي مكرر 3 مرات', lambda: (night_abs(12), night_abs(12), night_abs(12)), '12/10'),
+    # الإجازة الساعية (عمل) تغطي يومها مثل أي إجازة (قرار الموارد معلّق)
+    ('ما جا، وعنده إجازة ساعية (عمل) 08–10', lambda: (
+        day_abs(5), zam(5, 8, 10, kind=WORK_H)), ''),
 ]
 failed = []
 for label, build, expected in CASES:

@@ -16,9 +16,9 @@
 #    3) أيام غياب بالإيصال بدون أي سجل غياب (543)
 #
 #  القاعدة الجديدة تحسب اليوم غياب بس إذا:
-#    - بيه ساعات غياب ≥ 6 بسجلات العمل. يوم الشفت = توقيت بغداد ناقص 7 ساعات، يعني أي شي
-#      يبدي 00:00–07:00 يتبع اليوم اللي قبله (ذيل الشفت الليلي؛ ماكو شفت يبدي قبل 07:00).
-#      والجمعة لها قاعدة FRIDAY
+#    - بيه ساعات غياب ≥ 6 بسجلات العمل. يوم الشفت = منتصف سجل العمل بتوقيت بغداد ناقص 7 ساعات:
+#      ذيل الشفت الليلي (00:00–07:00) يتبع اليوم اللي قبله، والشفت اللي يبدي 04:00 أو 06:00 يتبع
+#      يومه. السجلات المكررة (نفس البداية والنهاية) تنحسب مرة وحدة. والجمعة لها قاعدة FRIDAY
 #    - وما عنده حضور مجموعه ≥ 6 ساعات بنفس يوم الشفت (= بدّل شفت، مو غايب). سجل الحضور
 #      يتبع يوم الشفت من منتصفه
 #    - وما عنده بصمتين بالجهاز بيناتهن 6–16 ساعة حول الشفت (= خطأ ترتيب بصمات).
@@ -28,7 +28,8 @@
 #      تروح لسياسة نسيان البصمة)
 #    - ومو بإجازة يوم كامل أو نص يوم تتقاطع ويه ساعات الغياب
 #    - الزمنية (4 ساعات بالشهر) ما تنحسب ببداية الدوام: إذا وصل الشركة قبلها تغطي ساعاتها بس،
-#      وإذا ما وصل تنحسب ساعاتها غياب. اليوم غياب إذا الباقي بعدها ≥ 6 ساعات
+#      وإذا ما وصل تنحسب ساعاتها غياب. اليوم غياب إذا الباقي بعدها ≥ 6 ساعات. الزمنية = نوعي
+#      الإجازة بـ ZAM_TYPES بس؛ باقي الإجازات بالساعات (مدفوعة، عمل) تغطي ساعاتها مثل أي إجازة
 #    - ومو عطلة رسمية (Global Time Off) يبدي بيها الشفت
 #    - والموظف عنده سياسة غياب بمجموعة السياسات، ومو «معفي من البصمة»
 #  وإذا الإيصال بيه أكثر من سطر إدخال ABSENCE، أودو يشغّل القاعدة مرة لكل سطر:
@@ -49,6 +50,7 @@ WORK_MIN = 6.0        # شفت حقيقي (حضور أو زوج بصمات) بي
 WORK_MAX = 16.0
 EXEMPT_TAG = 'معفي من البصمة'
 ABSENCE_TYPE = 'Absence'   # اسم نوع سجل العمل بالإنكليزي
+ZAM_TYPES = ('الزمنية', 'الزمنية (استثناءات)')   # أنواع إجازة الزمنية (الاسم بالعربي أو الإنكليزي)
 
 env = payslip.env
 emp = payslip.employee_id
@@ -73,8 +75,11 @@ if pg and pg.absence_policy_id and EXEMPT_TAG not in emp.category_ids.mapped('na
             ('state', '!=', 'cancelled'),
             ('date_start', '>=', str(to_date(start - 2))),
             ('date_start', '<=', str(to_date(end + 1)))]):
-        o = (w.date_start - 4 * one_hour).toordinal()       # UTC - 4 = بغداد - 7: ذيل 00:00–07:00 لليوم اللي قبله
+        # يوم الشفت من منتصف السجل (UTC - 4 = بغداد - 7)، نفس الحضور: شفت 04:00 يبقى بيومه
+        o = (w.date_start + (w.date_stop - w.date_start) / 2 - 4 * one_hour).toordinal()
         if start <= o <= end and to_date(o).weekday() != 4:  # الجمعة لها قاعدة FRIDAY
+            if [x for x in blocks.get(o, []) if x.date_start == w.date_start and x.date_stop == w.date_stop]:
+                continue                                     # سجل مكرر (conflict) = مرة وحدة
             hours[o] = hours.get(o, 0.0) + (w.duration or 0.0)
             blocks.setdefault(o, []).append(w)
     leaves = env['hr.leave'].sudo().search([
@@ -82,9 +87,12 @@ if pg and pg.absence_policy_id and EXEMPT_TAG not in emp.category_ids.mapped('na
         ('state', '=', 'validate'),
         ('request_date_from', '<=', to_date(end + 1)),
         ('request_date_to', '>=', to_date(start - 1))])
+    # نوعي الزمنية بالرقم، والاسم ينقرا بالعربي والإنكليزي حتى ما يعتمد على لغة اللي يحسب الإيصال
+    zam_types = (env['hr.leave.type'].sudo().with_context(lang='ar_001').search([('name', 'in', list(ZAM_TYPES))]) |
+                 env['hr.leave.type'].sudo().with_context(lang='en_US').search([('name', 'in', list(ZAM_TYPES))])).ids
     zam = {}
     for lv in leaves:
-        if lv.request_unit_hours:
+        if lv.request_unit_hours and lv.holiday_status_id.id in zam_types:
             zo = (lv.date_from - 4 * one_hour).toordinal()
             zam[zo] = zam.get(zo, 0.0) + (lv.date_to - lv.date_from) / one_hour
     cand = sorted([o for o in hours if hours[o] + zam.get(o, 0.0) >= MIN_HOURS])
@@ -170,7 +178,7 @@ if pg and pg.absence_policy_id and EXEMPT_TAG not in emp.category_ids.mapped('na
             on_leave = False
             lost = hours[o]
             for lv in leaves:
-                if lv.request_unit_hours:
+                if lv.request_unit_hours and lv.holiday_status_id.id in zam_types:
                     ov = 0.0
                     for w in blocks[o]:
                         ov += max(min(lv.date_to, w.date_stop) - max(lv.date_from, w.date_start), 0 * one_hour) / one_hour
