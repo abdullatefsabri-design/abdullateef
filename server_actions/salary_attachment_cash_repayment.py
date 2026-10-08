@@ -10,6 +10,8 @@
 #
 # الإجراء يحدّث رصيد السلفة فقط؛ استلام النقد نفسه يُسجَّل بالحسابات (سند قبض بصندوق
 # نفس عملة السلفة، دينار أو دولار) على حساب ذمم سلف الموظفين.
+# المبالغ تُكتب بدون اسم عملة لأن نوع الاستقطاع (دينار/دولار) هو اللي يحدد العملة،
+# وعملة الاستقطاع بأودو هي عملة الشركة وقد لا تطابق عملة سلفة الدولار.
 #
 # بيئة إجراءات الخادم (safe_eval) المتاح فيها: env, record, records, datetime, UserError, log.
 # مكتوب لـ Odoo 17 فما فوق.
@@ -28,16 +30,15 @@ for attachment in records:
     amount = (has_field and attachment[PAYMENT_FIELD]) or attachment.remaining_amount
     if amount <= 0 or attachment.currency_id.compare_amounts(amount, attachment.remaining_amount) > 0:
         raise UserError(
-            "مبلغ التسديد لـ \"%s\" لازم يكون أكبر من صفر وما يتجاوز المتبقي (%s %s)."
-            % (attachment.display_name, attachment.remaining_amount, attachment.currency_id.name)
+            "مبلغ التسديد لـ \"%s\" لازم يكون أكبر من صفر وما يتجاوز المتبقي (%s)."
+            % (attachment.display_name, attachment.remaining_amount)
         )
 
     # record_payment هي نفس الدالة التي تستعملها القسائم عند التأكيد: تزيد المبلغ المسدد،
     # تكتب بالـ Chatter، وتغلق الاستقطاع تلقائياً إذا صار المتبقي صفراً
     attachment.record_payment(amount)
     attachment.message_post(
-        body="التسديد أعلاه نقدي خارج الراتب (%s %s)، سجّله %s."
-        % (amount, attachment.currency_id.name, env.user.name)
+        body="التسديد أعلاه نقدي خارج الراتب (%s)، سجّله %s." % (amount, env.user.name)
     )
     if has_field:
         attachment.write({PAYMENT_FIELD: 0})
