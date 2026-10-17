@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""قراءة البيانات الحية من Odoo (قراءة فقط) للمدير المالي.
+r"""قراءة البيانات الحية من Odoo (قراءة فقط) للمدير المالي.
 
 الأوامر:
   snapshot        صورة مالية لحظية: النقد، الذمم المدينة والدائنة وأعمارها، الفواتير غير المسددة،
                   أوامر الشراء المفتوحة، طلبات الموافقة المعلقة، الإيرادات والمصاريف للشهر والسنة.
   costs           قيود المصاريف المرحّلة لفترة → CSV جاهز لـ build_cost_workbook.py.
   trial-balance   ميزان المراجعة لفترة (لمطابقة تقرير التكاليف مع الدفاتر).
+  export          تصدير كامل صامت لكل ما يحتاجه المدير المالي إلى مجلد مؤرخ، مع فهرس مجاميع ضابطة وسجل.
+                  يصلح للجدولة بـ pythonw (بدون نافذة). رمز الخروج 0 نجاح، 1 ملفات ناقصة، 2 خطأ اتصال.
 
 الاتصال من متغيرات البيئة (لا تكتبها بالكود ولا تلصقها بالمحادثة):
   ODOO_URL      اختياري، والافتراضي رابط البركة https://brk.ejaferp.com
@@ -18,9 +20,10 @@
   python odoo_fetch.py costs --from 2026-07-01 --to 2026-09-30 --out costs_q3.csv
   python odoo_fetch.py costs --from 2026-07-01 --to 2026-09-30 --account-prefix 3 --code-digits 4 --out costs.csv
   python odoo_fetch.py trial-balance --from 2026-01-01 --to 2026-09-30 --out tb.csv
+  pythonw odoo_fetch.py export --out-root "C:\Users\surface\Documents\الماليه\CFO\بيانات"
 
 مكتوب لـ Odoo 16 فما فوق (account_type وanalytic_distribution) عبر واجهة JSON-RPC.
-السكربت لا يستدعي أي دالة كتابة: المسموح فقط search_read وsearch_count وread.
+السكربت لا يستدعي أي دالة كتابة: المسموح فقط search_read وsearch_count وread وfields_get وread_group.
 """
 import argparse
 import csv
@@ -32,7 +35,7 @@ import urllib.request
 from collections import defaultdict
 
 DEFAULT_URL = 'https://brk.ejaferp.com'
-READ_ONLY_METHODS = {'search_read', 'search_count', 'read'}
+READ_ONLY_METHODS = {'search_read', 'search_count', 'read', 'fields_get', 'read_group'}
 PAGE = 2000
 EXPENSE_TYPES = ['expense', 'expense_direct_cost', 'expense_depreciation']
 PAYMENT_STATES = {'paid': 'مدفوع', 'in_payment': 'مدفوع', 'not_paid': 'غير مدفوع', 'partial': 'جزئي',
@@ -254,6 +257,228 @@ def cmd_trial_balance(odoo, args):
           + ('متوازن ✓' if round(td - tc, 2) == 0 else f'⚠ غير متوازن بفرق {fmt(td - tc)}'))
 
 
+# ---------- التصدير الكامل (export) ----------
+
+PL_PREFIXES = ('income', 'expense')
+
+
+def fiscal_periods(start_month, today=None):
+    today = today or dt.date.today()
+    year = today.year if today.month >= start_month else today.year - 1
+    start = dt.date(year, start_month, 1)
+    prev_start = dt.date(year - 1, start_month, 1)
+    return {'FROM': start, 'TO': today, 'PREV_FROM': prev_start, 'PREV_TO': start - dt.timedelta(days=1)}
+
+
+def cell(v):
+    if v is False or v is None:
+        return ''
+    if isinstance(v, list) and len(v) == 2 and isinstance(v[0], int) and isinstance(v[1], str):
+        return v[1]
+    if isinstance(v, (dict, list)):
+        return json.dumps(v, ensure_ascii=False)
+    if isinstance(v, float):
+        return f'{v:.6f}'.rstrip('0').rstrip('.')
+    return v
+
+
+def export_model(odoo, out_dir, fname, model, domain, wanted, control=(), order=None):
+    """يصدّر موديلاً إلى CSV بالحقول المتوفرة فقط، ويرجع سطر الفهرس."""
+    entry = {'file': fname + '.csv', 'model': model, 'rows': '', 'control': '', 'status': ''}
+    try:
+        meta = odoo.call(model, 'fields_get', [], attributes=['type', 'relation'])
+    except RuntimeError:
+        entry.update(file=fname, status='غير مثبت أو بدون صلاحية')
+        return entry, []
+    fields = [f for f in wanted if f in meta]
+    rows = odoo.search_read(model, domain, fields, order=order)
+    for f in fields:  # أسماء بدل أرقام لحقول القوائم المتعددة
+        if meta[f]['type'] in ('many2many', 'one2many') and meta[f].get('relation'):
+            ids = sorted({i for r in rows for i in (r[f] or [])})
+            names = {}
+            for k in range(0, len(ids), PAGE):
+                for rec in odoo.call(meta[f]['relation'], 'read', [ids[k:k + PAGE]], fields=['display_name']):
+                    names[rec['id']] = rec['display_name']
+            for r in rows:
+                r[f] = '، '.join(names.get(i, str(i)) for i in (r[f] or []))
+    sums = {c: 0.0 for c in control if c in fields}
+    with open(os.path.join(out_dir, entry['file']), 'w', newline='', encoding='utf-8-sig') as fh:
+        w = csv.writer(fh)
+        w.writerow(fields)
+        for r in rows:
+            w.writerow([cell(r.get(f)) for f in fields])
+            for c in sums:
+                sums[c] += r.get(c) or 0.0
+    missing = [f for f in wanted if f not in meta]
+    entry.update(rows=len(rows), control='، '.join(f'{c} = {v:,.2f}' for c, v in sums.items()),
+                 status='تم' + (f' (حقول غير موجودة بهذه النسخة: {", ".join(missing)})' if missing else ''))
+    return entry, rows
+
+
+def grouped_by_account(odoo, domain):
+    """مجاميع المدين والدائن لكل حساب: read_group، وإذا ما توفر فبالتجميع المحلي."""
+    try:
+        res = odoo.call('account.move.line', 'read_group', [domain, ['debit:sum', 'credit:sum'], ['account_id']], lazy=False)
+        return {g['account_id'][0]: (g['debit'] or 0.0, g['credit'] or 0.0) for g in res if g.get('account_id')}
+    except RuntimeError:
+        agg = defaultdict(lambda: [0.0, 0.0])
+        for ln in odoo.search_read('account.move.line', domain, ['account_id', 'debit', 'credit']):
+            a = agg[ln['account_id'][0]]
+            a[0] += ln['debit']
+            a[1] += ln['credit']
+        return {k: tuple(v) for k, v in agg.items()}
+
+
+def export_trial_balance(odoo, out_dir, periods):
+    """ميزان مراجعة: حركة الفترة لكل الحسابات، والرصيد التراكمي لحسابات الميزانية فقط،
+    ونتائج السنوات السابقة سطراً مستقلاً حتى يتوازن الميزان."""
+    posted = [('parent_state', '=', 'posted')]
+    f, t = periods['FROM'].isoformat(), periods['TO'].isoformat()
+    accounts = {a['id']: a for a in odoo.search_read('account.account', [], ['code', 'name', 'account_type'])}
+    period = grouped_by_account(odoo, posted + [('date', '>=', f), ('date', '<=', t)])
+    cumulative = grouped_by_account(odoo, posted + [('date', '<=', t)])
+    before = grouped_by_account(odoo, posted + [('date', '<', f)])
+    is_pl = lambda aid: str(accounts.get(aid, {}).get('account_type', '')).startswith(PL_PREFIXES)
+    prior_pl = sum(d - c for aid, (d, c) in before.items() if is_pl(aid))
+    fname = '13_ميزان_المراجعة.csv'
+    tot = [0.0, 0.0, 0.0]
+    by_type = defaultdict(float)
+    with open(os.path.join(out_dir, fname), 'w', newline='', encoding='utf-8-sig') as fh:
+        w = csv.writer(fh)
+        w.writerow(['code', 'name', 'account_type', 'period_debit', 'period_credit', 'period_balance', 'closing_balance'])
+        for aid in sorted(set(period) | set(cumulative), key=lambda a: str(accounts.get(a, {}).get('code', a))):
+            acc = accounts.get(aid, {'code': aid, 'name': '', 'account_type': ''})
+            d, c = period.get(aid, (0.0, 0.0))
+            closing = d - c if is_pl(aid) else (lambda x: x[0] - x[1])(cumulative.get(aid, (0.0, 0.0)))
+            w.writerow([acc['code'], acc['name'], acc['account_type'], cell(d), cell(c), cell(d - c), cell(closing)])
+            tot[0] += d
+            tot[1] += c
+            tot[2] += closing
+            by_type[acc['account_type']] += closing
+        w.writerow(['', 'نتائج السنوات السابقة (محسوبة)', 'equity_unaffected', '', '', '', cell(prior_pl)])
+    tot[2] += prior_pl
+    ok = round(tot[0] - tot[1], 2) == 0 and round(tot[2], 2) == 0
+    return {'file': fname, 'model': 'account.move.line (مجمّع)', 'rows': len(set(period) | set(cumulative)) + 1,
+            'control': f'مدين الفترة = {tot[0]:,.2f}، دائن الفترة = {tot[1]:,.2f}، مجموع الأرصدة = {tot[2]:,.2f}',
+            'status': 'تم، متوازن' if ok else 'تم، غير متوازن ويحتاج تحقق', '_by_type': by_type}
+
+
+def export_aging(odoo, out_dir, fname, acc_type, sign, today):
+    lines = odoo.search_read('account.move.line', [('parent_state', '=', 'posted'), ('account_id.account_type', '=', acc_type),
+                                                   ('reconciled', '=', False), ('amount_residual', '!=', 0)],
+                             ['partner_id', 'date', 'date_maturity', 'amount_residual'])
+    labels = ['not_due', 'd1_30', 'd31_90', 'd91_180', 'd180_plus']
+    per = defaultdict(lambda: [0.0] * 5)
+    for ln in lines:
+        days = (today - dt.date.fromisoformat(ln['date_maturity'] or ln['date'])).days
+        k = 0 if days <= 0 else 1 if days <= 30 else 2 if days <= 90 else 3 if days <= 180 else 4
+        per[name_of(ln['partner_id']) or 'بدون شريك'][k] += sign * ln['amount_residual']
+    total = 0.0
+    with open(os.path.join(out_dir, fname + '.csv'), 'w', newline='', encoding='utf-8-sig') as fh:
+        w = csv.writer(fh)
+        w.writerow(['partner'] + labels + ['total'])
+        for partner, b in sorted(per.items(), key=lambda x: -sum(x[1])):
+            w.writerow([partner] + [cell(v) for v in b] + [cell(sum(b))])
+            total += sum(b)
+    return {'file': fname + '.csv', 'model': 'account.move.line (غير مسوّاة)', 'rows': len(per),
+            'control': f'الإجمالي = {total:,.2f}', 'status': 'تم', '_total': total}
+
+
+def cmd_export(odoo, args):
+    p = fiscal_periods(args.fy_start_month)
+    f, t, pf, pt = (p[k].isoformat() for k in ('FROM', 'TO', 'PREV_FROM', 'PREV_TO'))
+    out_dir = os.path.join(args.out_root, 'Odoo_تصدير_' + dt.datetime.now().strftime('%Y-%m-%d_%H%M'))
+    os.makedirs(out_dir, exist_ok=True)
+    log = open(os.path.join(out_dir, 'run.log'), 'a', encoding='utf-8')
+    say = lambda m: (log.write(dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S  ') + m + '\n'), log.flush())
+    started = dt.datetime.now()
+    company, cur = company_currency(odoo)
+    version = odoo._call('common', 'version', []).get('server_version', '?')
+    say(f'اتصال: {company} | Odoo {version} | السنة الحالية {f} إلى {t}')
+
+    posted = [('parent_state', '=', 'posted')]
+    year = lambda a, b: [('date', '>=', a), ('date', '<=', b)]
+    aml = ['date', 'move_name', 'journal_id', 'ref', 'account_id', 'partner_id', 'name', 'analytic_distribution',
+           'debit', 'credit', 'balance', 'currency_id', 'amount_currency', 'matching_number', 'date_maturity']
+    inv = ['name', 'partner_id', 'invoice_date', 'invoice_date_due', 'ref', 'amount_total_signed',
+           'amount_residual_signed', 'payment_state', 'invoice_user_id', 'currency_id', 'move_type']
+    specs = [
+        ('10_دليل_الحسابات', 'account.account', [], ['code', 'name', 'account_type', 'reconcile', 'currency_id'], (), 'code'),
+        ('11_قيود_اليومية_السنة_الحالية', 'account.move.line', posted + year(f, t), aml, ('debit', 'credit'), 'date, id'),
+        ('12_قيود_اليومية_السنة_السابقة', 'account.move.line', posted + year(pf, pt), aml, ('debit', 'credit'), 'date, id'),
+        ('16_فواتير_الزبائن', 'account.move', [('move_type', 'in', ['out_invoice', 'out_refund']), ('state', '=', 'posted')]
+         + [('invoice_date', '>=', f), ('invoice_date', '<=', t)], inv, ('amount_total_signed', 'amount_residual_signed'), 'invoice_date'),
+        ('17_فواتير_الموردين', 'account.move', [('move_type', 'in', ['in_invoice', 'in_refund']), ('state', '=', 'posted')]
+         + [('invoice_date', '>=', f), ('invoice_date', '<=', t)], inv, ('amount_total_signed', 'amount_residual_signed'), 'invoice_date'),
+        ('18_الدفعات', 'account.payment', [('date', '>=', f), ('date', '<=', t)],
+         ['date', 'name', 'journal_id', 'partner_id', 'payment_type', 'partner_type', 'amount', 'currency_id', 'state'], ('amount',), 'date'),
+        ('19_الوكلاء_والزبائن', 'res.partner', [('is_company', '=', True)],
+         ['name', 'city', 'phone', 'user_id', 'property_payment_term_id', 'credit_limit', 'credit', 'debit', 'category_id'], ('credit',), 'name'),
+        ('20_أسعار_العملات', 'res.currency.rate', [], ['name', 'currency_id', 'rate', 'inverse_company_rate', 'company_rate'], (), 'name'),
+        ('21_المنتجات', 'product.product', [], ['default_code', 'name', 'categ_id', 'uom_id', 'standard_price', 'list_price',
+                                               'detailed_type', 'type', 'qty_available', 'weight'], (), 'default_code'),
+        ('22_تقييم_المخزون', 'stock.valuation.layer', [], ['product_id', 'create_date', 'quantity', 'value', 'description'], ('value',), 'create_date'),
+        ('23_أوامر_الشراء', 'purchase.order', [('date_order', '>=', f)], ['name', 'partner_id', 'date_order', 'amount_total',
+                                                                          'currency_id', 'state', 'invoice_status', 'receipt_status'], (), 'date_order'),
+        ('24_أوامر_البيع', 'sale.order', [('date_order', '>=', f)], ['name', 'partner_id', 'date_order', 'amount_total',
+                                                                     'state', 'invoice_status'], ('amount_total',), 'date_order'),
+        ('25_أوامر_التصنيع', 'mrp.production', [('create_date', '>=', f)], ['name', 'product_id', 'product_qty', 'qty_produced',
+                                                                             'date_start', 'date_planned_start', 'date_finished', 'bom_id', 'state'], (), 'create_date'),
+        ('26_قوائم_المواد', 'mrp.bom.line', [], ['bom_id', 'product_id', 'product_qty', 'product_uom_id'], (), 'bom_id'),
+        ('27_طلبات_الموافقة', 'approval.request', [], ['name', 'category_id', 'request_owner_id', 'date', 'request_status', 'amount'], (), 'id'),
+        ('28_الدفاتر', 'account.journal', [], ['name', 'type', 'code', 'currency_id', 'default_account_id'], (), 'code'),
+        ('29_الحسابات_التحليلية', 'account.analytic.account', [], ['name', 'plan_id', 'code', 'balance'], (), 'name'),
+    ]
+    entries, failures = [], 0
+    for fname, model, domain, wanted, control, order in specs:
+        try:
+            entry, rows = export_model(odoo, out_dir, fname, model, domain, wanted, control, order)
+            if fname.startswith(('11_', '12_')) and rows:
+                d, c = sum(r['debit'] for r in rows), sum(r['credit'] for r in rows)
+                entry['status'] += '، المدين = الدائن' if round(d - c, 2) == 0 else '، المدين لا يساوي الدائن ويحتاج تحقق'
+        except Exception as e:  # ملف واحد فاشل ما يوقف الباقي
+            entry, failures = {'file': fname, 'model': model, 'rows': '', 'control': '', 'status': f'فشل: {e}'}, failures + 1
+        entries.append(entry)
+        say(f'{entry["file"]}: {entry["status"]} ({entry["rows"]} سطر)')
+    for fname, fn in (('13_ميزان_المراجعة', lambda: export_trial_balance(odoo, out_dir, p)),
+                      ('14_أعمار_الذمم_المدينة', lambda: export_aging(odoo, out_dir, '14_أعمار_الذمم_المدينة', 'asset_receivable', 1, p['TO'])),
+                      ('15_أعمار_الذمم_الدائنة', lambda: export_aging(odoo, out_dir, '15_أعمار_الذمم_الدائنة', 'liability_payable', -1, p['TO']))):
+        try:
+            entry = fn()
+        except Exception as e:
+            entry, failures = {'file': fname, 'model': 'account.move.line', 'rows': '', 'control': '', 'status': f'فشل: {e}'}, failures + 1
+        entries.append(entry)
+        say(f'{entry["file"]}: {entry["status"]}')
+
+    # مطابقة الأعمار مع أرصدة الميزان: الفرق يعني قيوداً على حسابات الذمم بدون تسوية صحيحة
+    found = {e['file'][:2]: e for e in entries}
+    checks = []
+    if '_by_type' in found.get('13', {}):
+        for code, acc_type, sign, label in (('14', 'asset_receivable', 1, 'الذمم المدينة'), ('15', 'liability_payable', -1, 'الذمم الدائنة')):
+            if '_total' in found.get(code, {}):
+                diff = found[code]['_total'] - sign * found['13']['_by_type'].get(acc_type, 0.0)
+                checks.append(f'- مطابقة {label}: الأعمار مقابل الميزان '
+                              + ('متطابقة' if round(diff, 2) == 0 else f'بفرق {diff:,.2f} ويحتاج تحقق'))
+                if round(diff, 2) != 0:
+                    failures += 1
+    entries.sort(key=lambda e: e['file'])
+    lines = ['# فهرس تصدير Odoo (قراءة فقط)', '',
+             f'- الشركة: {company}، العملة: {cur}، نسخة Odoo: {version}',
+             f'- البداية: {started:%Y-%m-%d %H:%M:%S}، والنهاية: {dt.datetime.now():%Y-%m-%d %H:%M:%S}',
+             f'- السنة الحالية: {f} إلى {t}، والسابقة: {pf} إلى {pt}. القيود المرحّلة فقط.',
+             '- كل الاستدعاءات للقراءة فقط (search_read وread وfields_get وread_group). لم يُكتب شي على Odoo.',
+             '- أسماء الأعمدة هي الأسماء التقنية للحقول بـ Odoo.', '',
+             *checks, '',
+             '| الملف | الموديل | الأسطر | المجاميع الضابطة | الحالة |', '|---|---|---:|---|---|']
+    lines += [f"| {e['file']} | {e['model']} | {e['rows']} | {e['control']} | {e['status']} |" for e in entries]
+    with open(os.path.join(out_dir, '00_فهرس.md'), 'w', encoding='utf-8-sig') as fh:
+        fh.write('\n'.join(lines) + '\n')
+    say(f'انتهى. فشل: {failures}')
+    log.close()
+    print(f'{out_dir} | فشل: {failures}')
+    return 1 if failures else 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest='cmd', required=True)
@@ -267,7 +492,21 @@ def main():
             p.add_argument('--account-prefix', help='بدل نوع الحساب: كل الحسابات التي يبدأ رمزها بهذا (مثل 3 للدليل الموحد)')
             p.add_argument('--code-digits', type=int, help='قص رمز الحساب لعدد أرقام (مثل 4) ليطابق دليل الترميز')
             p.add_argument('--include-capex', action='store_true', help='تضمين حسابات الأصول الثابتة')
+    p = sub.add_parser('export', help='تصدير كامل صامت إلى مجلد مؤرخ')
+    p.add_argument('--out-root', required=True, help='المجلد الأب للتصدير، مثل CFO\\بيانات')
+    p.add_argument('--fy-start-month', type=int, default=1, help='شهر بداية السنة المالية (افتراضياً 1)')
     args = parser.parse_args()
+    if args.cmd == 'export':
+        # بالتشغيل الصامت ما توجد شاشة، فأي خطأ قبل إنشاء المجلد يُكتب بسجل بالمجلد الأب
+        try:
+            sys.exit(cmd_export(Odoo(), args))
+        except (SystemExit, Exception) as e:
+            if isinstance(e, SystemExit) and e.code in (0, 1, None):
+                raise
+            os.makedirs(args.out_root, exist_ok=True)
+            with open(os.path.join(args.out_root, 'odoo_export_errors.log'), 'a', encoding='utf-8') as fh:
+                fh.write(f'{dt.datetime.now():%Y-%m-%d %H:%M:%S}  {e}\n')
+            sys.exit(2)
     odoo = Odoo()
     {'snapshot': cmd_snapshot, 'costs': cmd_costs, 'trial-balance': cmd_trial_balance}[args.cmd](odoo, args)
 
