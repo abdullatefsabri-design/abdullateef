@@ -20,7 +20,7 @@
 == قراءة فقط: هذا أهم شرط بالمهمة ==
 المهمة قراءة فقط. لا يتغير أي شي بقاعدة بيانات الخازن، ولا ببرنامج الخازن، ولا بإعدادات الجهاز.
 الكتابة الوحيدة المسموحة: إنشاء مجلد التصدير (أدناه) وكتابة الملفات داخله، وملفي الإعداد والاستعلامات
-بمجلد الأدوات C:\Users\surface\Documents\الماليه\الخازن_أدوات\ (المرحلة 3).
+بمجلد الأدوات C:\Users\surface\Documents\الماليه\CFO\أدوات\ (المرحلة 3).
 
 1. القاعدة:
    - المسموح فقط SELECT (ومعها WITH)، واستعلامات وصف البنية (INFORMATION_SCHEMA، sys.tables، sys.columns).
@@ -67,7 +67,7 @@ function Invoke-ReadOnlyQuery([string]$ConnStr, [string]$Sql, [string]$OutCsv) {
 # بـ PowerShell 7 استخدم -Encoding utf8BOM بدل UTF8 حتى يظهر العربي صحيح.
 
 == المجلد والصيغ ==
-- أنشئ: C:\Users\surface\Documents\الماليه\الخازن_تصدير_<تاريخ اليوم YYYY-MM-DD>\
+- أنشئ: C:\Users\surface\Documents\الماليه\CFO\بيانات\الخازن_تصدير_<تاريخ اليوم YYYY-MM-DD>\
 - الصيغة CSV بترميز UTF-8 مع BOM (من دالة القراءة الآمنة)، أو XLSX من تقارير البرنامج.
 - التواريخ YYYY-MM-DD، والأرقام بدون فواصل آلاف، والعملة بعمود مستقل.
 - الفترات:
@@ -133,7 +133,7 @@ function Invoke-ReadOnlyQuery([string]$ConnStr, [string]$Sql, [string]$OutCsv) {
    بدون أي تعليقات داخل نص الاستعلام (الحارس يرفض كلمة مثل update حتى بتعليق).
 3. اكتب بمجلد الأدوات khazen_config.json:
      {"provider": "sqlserver", "connection": "Server=<الخادم>;Database=<القاعدة>;Integrated Security=True;ApplicationIntent=ReadOnly",
-      "queries": "<مسار khazen_queries.sql>", "output_root": "C:\\Users\\surface\\Documents\\الماليه", "fiscal_year_start_month": 1}
+      "queries": "<مسار khazen_queries.sql>", "output_root": "C:\\Users\\surface\\Documents\\الماليه\\CFO\\بيانات", "fiscal_year_start_month": 1}
    لـ Access: "provider": "access" و"access_file": "<مسار الملف>" بدل connection.
    التشغيل الصامت بحساب ويندوز فقط، والسكربت يرفض أي كلمة مرور بالملف. إذا القاعدة ما تقبل إلا
    حساب SQL بكلمة مرور، توقف وسجّل "يحتاج قرار" بالفهرس.

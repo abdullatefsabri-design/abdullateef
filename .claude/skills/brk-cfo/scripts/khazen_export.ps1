@@ -17,7 +17,7 @@
     رموز الخروج: 0 نجاح كامل، 1 استعلام أو أكثر رُفض أو فشل، 2 خطأ إعداد أو اتصال.
 
 .EXAMPLE
-    powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File khazen_export.ps1 -Config "C:\Users\surface\Documents\الماليه\الخازن_أدوات\khazen_config.json"
+    powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File khazen_export.ps1 -Config "C:\Users\surface\Documents\الماليه\CFO\أدوات\khazen_config.json"
 
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File khazen_export.ps1 -SelfTest
