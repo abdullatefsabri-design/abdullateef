@@ -33,6 +33,7 @@ description: المدير المالي (CFO) لشركة البركة للاست�
 | خطة استحصال أو تحصيل، شكد أحصّل من كل وكيل، كشف وكلاء | `brk-operations.md` §3–4 | Excel بمعادلات حية (`house-style.md`) | ملف سيولة واستحصال |
 | سيولة، رواتب، عبور الأزمة، خطة بديلة | `brk-operations.md` §4، و`cfo-playbook.md` §4 | `odoo_fetch.py snapshot` | ملف + مذكرة |
 | تسوية الصناديق وفروقاتها | `brk-operations.md` §5 | | ملف تسوية + سجل بنود مفتوحة |
+| مطابقة الخازن ويه Odoo (وكلاء، صناديق، شركاء، مبيعات) | `company.md` §4 و§6 | `recon_khazen_odoo.py --khazen <مجلد> --odoo <مجلد> --cutoff <تاريخ> --check --pdf` | ملف مطابقة + بنود مفتوحة |
 | الفروقات مع المحاسب، تقرير المصاريف، انحرافات | `brk-operations.md` §7، و`cost-accounting.md` §7 | `odoo_fetch.py costs` و`trial-balance` | جسر فروقات + أسئلة للمحاسب |
 | رتب التكاليف، الفعلي مقابل الموازنة | `cost-accounting.md` | `validate_costs.py` ثم `build_cost_workbook.py` | ملف تكاليف بسبع أوراق |
 | كلفة الطن أو المتر، تسعير، هامش، أثر الراتنج والصرف | `brk-operations.md` §1–2 | `fx_impact.py` | مذكرة أو ملف |
