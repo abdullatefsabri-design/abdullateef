@@ -1,2 +1,4 @@
 # إعدادات إضافة Odoo timesheet المحلية (فيها حقل كلمة مرور) — لا تُرفع للمستودع
 .claude/odoo-timesheet/
+__pycache__/
+*.pyc
