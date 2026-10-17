@@ -156,7 +156,7 @@ def load_rows(path):
     mapping = _map_headers(headers)
     missing = {'date', 'cost_code'} - set(mapping.values())
     if missing:
-        raise SystemExit('أعمدة إلزامية مفقودة: %s — العناوين الموجودة: %s' % (', '.join(sorted(missing)), headers))
+        raise SystemExit('أعمدة إلزامية مفقودة: %s | العناوين الموجودة: %s' % (', '.join(sorted(missing)), headers))
     rows = []
     for raw in data:
         rec = {key: (raw[i] if i < len(raw) else None) for i, key in mapping.items()}
@@ -195,7 +195,7 @@ def prepare_rows(rows, base='IQD', fx=None):
     for i, r in enumerate(rows, start=2):
         if not r['currency']:
             r['currency'] = base
-            notes.append(Issue(INFO, i, 'العملة', f'العملة غير محددة — افتُرضت {base}'))
+            notes.append(Issue(INFO, i, 'العملة', f'العملة غير محددة، وافتُرضت {base}'))
         if r['fx_rate']:
             r['fx_source'] = 'القيد'
         elif r['currency'] == base:
@@ -203,8 +203,8 @@ def prepare_rows(rows, base='IQD', fx=None):
         elif r['currency'] in fx:
             r['fx_rate'], r['fx_source'] = fx[r['currency']], 'افتراضي'
             notes.append(Issue(INFO, i, 'سعر الصرف',
-                               f'استُخدم السعر الافتراضي {fx[r["currency"]]:,.2f} لعملة {r["currency"]} — '
-                               'المعيار IAS 21 يطلب سعر تاريخ المعاملة'))
+                               f'استُخدم السعر الافتراضي {fx[r["currency"]]:,.2f} لعملة {r["currency"]}، '
+                               'والمعيار IAS 21 يطلب سعر تاريخ المعاملة'))
         else:
             r['fx_source'] = None
         if r['qty'] is not None and r['unit_price'] is not None:
@@ -229,7 +229,7 @@ def validate(rows, codes, base='IQD', approval_limit=None, capex_threshold=1_000
             if (period_start and r['date'] < period_start) or (period_end and r['date'] > period_end):
                 add(WARNING, i, 'التاريخ', f'التاريخ {r["date"]} خارج فترة التقرير')
             if r['date'].weekday() == 4:
-                add(INFO, i, 'التاريخ', 'قيد بيوم جمعة — تأكد أنه ليس إدخالاً خارج الدوام بدون مبرر')
+                add(INFO, i, 'التاريخ', 'قيد بيوم جمعة، يلزم التحقق من أنه ليس إدخالاً خارج الدوام بدون مبرر')
 
         code = r['cost_code']
         if code is None:
@@ -242,17 +242,17 @@ def validate(rows, codes, base='IQD', approval_limit=None, capex_threshold=1_000
         if r['total'] is None:
             add(ERROR, i, 'المبلغ', 'الكمية أو سعر الوحدة مفقود')
         elif r['total'] <= 0:
-            add(WARNING, i, 'المبلغ', 'مبلغ صفري أو سالب — إذا كان إشعاراً دائناً وضّح ذلك بالوصف')
+            add(WARNING, i, 'المبلغ', 'مبلغ صفري أو سالب، وإذا كان إشعاراً دائناً يُوضَّح ذلك بالوصف')
 
         if r['fx_source'] is None:
-            add(ERROR, i, 'سعر الصرف', f'لا يوجد سعر صرف لعملة {r["currency"]} — أضفه بالقيد أو مرّر --fx {r["currency"]}=...')
+            add(ERROR, i, 'سعر الصرف', f'لا يوجد سعر صرف لعملة {r["currency"]}، ويُضاف بالقيد أو بالخيار --fx {r["currency"]}=...')
         elif r['currency'] == 'USD' and base == 'IQD' and not 1000 <= r['fx_rate'] <= 2500:
             add(WARNING, i, 'سعر الصرف', f'سعر صرف الدولار {r["fx_rate"]:,.2f} غير منطقي')
 
         if not r['vendor']:
             add(WARNING, i, 'المورد', 'المورد غير محدد')
         if not r['ref']:
-            add(WARNING, i, 'رقم المرجع', 'بدون رقم مستند — كل قيد يحتاج مستنداً مؤيداً')
+            add(WARNING, i, 'رقم المرجع', 'بدون رقم مستند، وكل قيد يحتاج مستنداً مؤيداً')
 
         base_amt = r['amount_base']
         if base_amt is not None:
@@ -260,11 +260,11 @@ def validate(rows, codes, base='IQD', approval_limit=None, capex_threshold=1_000
             is_opex = code in codes and codes[code]['capex_opex'] == 'تشغيلي'
             looks_like_asset = any(w in text for w in CAPEX_WORDS) and not any(w in text for w in SERVICE_WORDS)
             if is_opex and capex_threshold and base_amt >= capex_threshold and looks_like_asset:
-                add(WARNING, i, 'رمز الكلفة', 'يبدو شراء أصل مصنّفاً كمصروف تشغيلي — راجع الرسملة حسب IAS 16')
+                add(WARNING, i, 'رمز الكلفة', 'يبدو شراء أصل مصنّفاً كمصروف تشغيلي، وتلزم مراجعة الرسملة حسب IAS 16')
             exempt = code in ROUND_EXEMPT_CODES or (code or 0) // 100 in ROUND_EXEMPT_CATEGORIES
             # يُفحص التدوير بالعملة الأساسية فقط، لأن تحويل عملة أجنبية قد ينتج رقماً مدوّراً بالصدفة
             if r['currency'] == base and not exempt and base_amt >= round_floor and base_amt % round_unit == 0:
-                add(INFO, i, 'المبلغ', f'مبلغ مدوّر ({base_amt:,.0f}) — تأكد من وجود فاتورة تفصيلية')
+                add(INFO, i, 'المبلغ', f'مبلغ مدوّر ({base_amt:,.0f})، يلزم التحقق من وجود فاتورة تفصيلية')
 
     # التكرار: نفس المورد ورقم المستند والمبلغ، أو نفس المورد والتاريخ والمبلغ بدون رقم مستند
     seen = {}

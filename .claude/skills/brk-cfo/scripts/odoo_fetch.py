@@ -8,7 +8,7 @@
   trial-balance   ميزان المراجعة لفترة (لمطابقة تقرير التكاليف مع الدفاتر).
 
 الاتصال من متغيرات البيئة (لا تكتبها بالكود ولا تلصقها بالمحادثة):
-  ODOO_URL      مثل https://erp.company.iq
+  ODOO_URL      اختياري، والافتراضي رابط البركة https://brk.ejaferp.com
   ODOO_DB       اسم قاعدة البيانات
   ODOO_USER     اسم الدخول (login)
   ODOO_API_KEY  مفتاح API لمستخدم بصلاحيات قراءة المحاسبة فقط (Preferences → Account Security → New API Key)
@@ -31,6 +31,7 @@ import sys
 import urllib.request
 from collections import defaultdict
 
+DEFAULT_URL = 'https://brk.ejaferp.com'
 READ_ONLY_METHODS = {'search_read', 'search_count', 'read'}
 PAGE = 2000
 EXPENSE_TYPES = ['expense', 'expense_direct_cost', 'expense_depreciation']
@@ -40,10 +41,10 @@ PAYMENT_STATES = {'paid': 'مدفوع', 'in_payment': 'مدفوع', 'not_paid': 
 
 class Odoo:
     def __init__(self):
-        missing = [k for k in ('ODOO_URL', 'ODOO_DB', 'ODOO_USER', 'ODOO_API_KEY') if not os.environ.get(k)]
+        missing = [k for k in ('ODOO_DB', 'ODOO_USER', 'ODOO_API_KEY') if not os.environ.get(k)]
         if missing:
-            raise SystemExit('متغيرات البيئة غير معرّفة: %s — أضفها بإعدادات البيئة ثم ابدأ جلسة جديدة.' % ', '.join(missing))
-        self.url = os.environ['ODOO_URL'].rstrip('/') + '/jsonrpc'
+            raise SystemExit('متغيرات البيئة غير معرّفة: %s، وتُضاف بإعدادات البيئة ثم تُبدأ جلسة جديدة.' % ', '.join(missing))
+        self.url = os.environ.get('ODOO_URL', DEFAULT_URL).rstrip('/').removesuffix('/odoo') + '/jsonrpc'
         self.db, self.key = os.environ['ODOO_DB'], os.environ['ODOO_API_KEY']
         self.uid = self._call('common', 'login', [self.db, os.environ['ODOO_USER'], self.key])
         if not self.uid:
@@ -115,7 +116,7 @@ def cmd_snapshot(odoo, args):
     company, cur = company_currency(odoo)
     month_start, year_start = today.replace(day=1).isoformat(), today.replace(month=1, day=1).isoformat()
     posted = [('parent_state', '=', 'posted')]
-    print(f'# الصورة المالية — {company}\n\nبتاريخ {today} | العملة {cur} | المصدر: Odoo مباشرة (قيود مرحّلة فقط)\n')
+    print(f'# الصورة المالية: {company}\n\nبتاريخ {today} | العملة {cur} | المصدر: Odoo مباشرة (قيود مرحّلة فقط)\n')
 
     cash = odoo.search_read('account.move.line', posted + [('account_id.account_type', '=', 'asset_cash')],
                             ['account_id', 'balance'])

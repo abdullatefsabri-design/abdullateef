@@ -66,7 +66,7 @@ CENTER = Alignment(horizontal='center', vertical='center', wrap_text=True)
 RIGHT = Alignment(horizontal='right', vertical='center', wrap_text=True)
 
 FMT_PCT = '0.0%'
-FMT_ORIG = '#,##0.00;[Red](#,##0.00);"–"'
+FMT_ORIG = '#,##0.00;[Red](#,##0.00);"-"'
 FMT_RATE = '#,##0.00'
 FMT_DATE = 'yyyy-mm-dd'
 FMT_MONTH = 'yyyy-mm'
@@ -95,7 +95,7 @@ C = {name: get_column_letter(i) for i, (name, _) in enumerate(REG_COLS, start=1)
 
 
 def base_fmt(base):
-    return '#,##0;[Red](#,##0);"–"' if base == 'IQD' else '#,##0.00;[Red](#,##0.00);"–"'
+    return '#,##0;[Red](#,##0);"-"' if base == 'IQD' else '#,##0.00;[Red](#,##0.00);"-"'
 
 
 def style_header(ws, row, first_col, last_col):
@@ -132,7 +132,7 @@ def page_setup(ws, company, title_rows=None, landscape=True):
         ws.print_title_rows = title_rows
     ws.oddHeader.center.text = company
     ws.oddHeader.center.size = 9
-    ws.oddFooter.right.text = 'سري — للاستخدام الداخلي'
+    ws.oddFooter.right.text = 'سري، للاستخدام الداخلي'
     ws.oddFooter.center.text = 'صفحة &P من &N'
     ws.oddFooter.left.text = '&D'
     for part in (ws.oddFooter.right, ws.oddFooter.center, ws.oddFooter.left):
@@ -212,7 +212,7 @@ def build_register(wb, rows, row_issues, base, n_codes_last, n_centers_last, n_c
         values = {
             'التاريخ': r['date'], 'رقم المرجع': r['ref'] or None, 'مركز الكلفة': r['cost_center'] or None,
             'رمز الكلفة': r['cost_code'] if r['cost_code'] is not None else (r['raw_code'] or None),
-            'البند': f'=IF(${C["رمز الكلفة"]}{n}="","",IFERROR(VLOOKUP(${C["رمز الكلفة"]}{n},{LST}!$A:$H,2,FALSE),"⚠ رمز غير معرّف"))',
+            'البند': f'=IF(${C["رمز الكلفة"]}{n}="","",IFERROR(VLOOKUP(${C["رمز الكلفة"]}{n},{LST}!$A:$H,2,FALSE),"رمز غير معرّف"))',
             'رمز الفئة': f'=IF(${C["رمز الكلفة"]}{n}="","",IFERROR(IF(${C["رمز الكلفة"]}{n}>=100,INT(${C["رمز الكلفة"]}{n}/100),${C["رمز الكلفة"]}{n}),""))',
             'الفئة الرئيسية': f'=IF(${C["رمز الفئة"]}{n}="","",IFERROR(VLOOKUP(${C["رمز الفئة"]}{n},{LST}!$A:$B,2,FALSE),""))',
             'طبيعة الكلفة': f'=IF(${C["رمز الكلفة"]}{n}="","",IFERROR(VLOOKUP(${C["رمز الكلفة"]}{n},{LST}!$A:$H,6,FALSE)&"",""))',
@@ -253,12 +253,12 @@ def build_register(wb, rows, row_issues, base, n_codes_last, n_centers_last, n_c
                          (C['حالة الدفع'], f'={LST}!$N$2:$N${len(PAY_STATUSES) + 1}')):
         dv = DataValidation(type='list', formula1=formula, allow_blank=True, showErrorMessage=True,
                             errorStyle='warning', errorTitle='قيمة خارج القائمة',
-                            error='القيمة غير موجودة في ورقة القوائم. أضفها هناك أولاً أو اختر من القائمة.')
+                            error='القيمة غير موجودة في ورقة القوائم، وتُضاف هناك أولاً أو تُختار من القائمة.')
         dv.add(f'{col}2:{col}{upto}')
         ws.add_data_validation(dv)
 
     rng = lambda col: f'{col}2:{col}{upto}'
-    ws.conditional_formatting.add(rng(C['البند']), FormulaRule(formula=[f'ISNUMBER(SEARCH("⚠",{C["البند"]}2))'], fill=FILL_RED))
+    ws.conditional_formatting.add(rng(C['البند']), FormulaRule(formula=[f'ISNUMBER(SEARCH("غير معرّف",{C["البند"]}2))'], fill=FILL_RED))
     ws.conditional_formatting.add(rng(C['سعر الصرف']), FormulaRule(
         formula=[f'AND({C["العملة"]}2<>"",{C["العملة"]}2<>"{base}",{C["سعر الصرف"]}2="")'], fill=FILL_RED))
     ws.conditional_formatting.add(rng(C['حالة الدفع']), FormulaRule(formula=[f'{C["حالة الدفع"]}2="غير مدفوع"'], fill=FILL_AMBER))
@@ -280,7 +280,7 @@ def build_budget(wb, codes, budget, months, base):
     first_m, last_m = get_column_letter(5), get_column_letter(4 + len(months))
     tot_col = get_column_letter(5 + len(months))
     for r, code in enumerate(bud_codes, start=2):
-        name = codes[code]['name_ar'] if code in codes else '⚠ رمز غير معرّف'
+        name = codes[code]['name_ar'] if code in codes else 'رمز غير معرّف'
         ws.cell(row=r, column=1, value=code)
         ws.cell(row=r, column=2, value=name)
         ws.cell(row=r, column=3, value=f'=IF(A{r}>=100,INT(A{r}/100),A{r})')
@@ -302,7 +302,7 @@ def build_budget(wb, codes, budget, months, base):
     style_total(ws, total_row, 1, 5 + len(months))
     set_widths(ws, [8, 34, 8, 12] + [14] * len(months) + [16])
     ws.freeze_panes = 'C2'
-    ws.cell(row=total_row + 2, column=2, value='الأرقام الزرقاء مدخلات: عدّلها هنا وتتحدث أوراق الملخص والانحراف تلقائياً.').font = F_NOTE
+    ws.cell(row=total_row + 2, column=2, value='الأرقام الزرقاء مدخلات، وتعديلها هنا يحدّث ورقتي الملخص والانحراف تلقائياً.').font = F_NOTE
     return tot_col, total_row
 
 
@@ -317,7 +317,7 @@ def build_variance(wb, codes, rows, budget, base, bud_tot_col):
     for r, code in enumerate(var_codes, start=2):
         cat = code // 100 if code >= 100 else code
         ws.cell(row=r, column=1, value=code)
-        ws.cell(row=r, column=2, value=codes[code]['name_ar'] if code in codes else '⚠ رمز غير معرّف')
+        ws.cell(row=r, column=2, value=codes[code]['name_ar'] if code in codes else 'رمز غير معرّف')
         ws.cell(row=r, column=3, value=codes[cat]['name_ar'] if cat in codes else '')
         ws.cell(row=r, column=4, value=f'=SUMIFS({BUD}!${bud_tot_col}:${bud_tot_col},{BUD}!$A:$A,A{r})')
         ws.cell(row=r, column=5, value=f'=SUMIFS({REG}!${C["الإجمالي بالعملة الأساسية"]}:${C["الإجمالي بالعملة الأساسية"]},{REG}!${C["رمز الكلفة"]}:${C["رمز الكلفة"]},A{r})')
@@ -339,9 +339,9 @@ def build_variance(wb, codes, rows, budget, base, bud_tot_col):
         ws.conditional_formatting.add(status, FormulaRule(formula=[f'H2="{text}"'], fill=fill))
     set_widths(ws, [8, 34, 24, 16, 16, 18, 12, 18])
     ws.freeze_panes = 'C2'
-    notes = ['الوفر / (التجاوز) = الموازنة − الفعلي؛ القيمة بين قوسين وبالأحمر تعني تجاوزاً.',
+    notes = ['الوفر / (التجاوز) = الموازنة ناقص الفعلي؛ القيمة بين قوسين وبالأحمر تعني تجاوزاً.',
              'قريب من الحد = استُخدم 90% أو أكثر من موازنة البند.',
-             'إذا كانت الموازنة على مستوى الفئة الرئيسية فقارن على مستوى الفئة في ورقة الملخص.']
+             'عندما تكون الموازنة على مستوى الفئة الرئيسية تكون المقارنة في ورقة الملخص.']
     for i, text in enumerate(notes):
         ws.cell(row=total_row + 2 + i, column=2, value=text).font = F_NOTE
     return ws
@@ -357,7 +357,7 @@ def build_issues(wb, issues):
         for col in range(1, 6):
             style_body(ws.cell(row=i + 1, column=col), align=CENTER if col < 5 else RIGHT)
     if not issues:
-        ws.append([None, None, None, None, 'لا توجد ملاحظات — البيانات اجتازت كل الفحوصات.'])
+        ws.append([None, None, None, None, 'لا توجد ملاحظات، البيانات اجتازت كل الفحوصات.'])
     last = len(issues) + 1
     for text, fill in ((ERROR, FILL_RED), (WARNING, FILL_AMBER), (INFO, FILL_SECTION)):
         ws.conditional_formatting.add(f'B2:B{max(last, 2)}', FormulaRule(formula=[f'B2="{text}"'], fill=fill))
@@ -378,7 +378,7 @@ def build_summary(wb, codes, rows, budget, centers, months, opts, bud_tot_col, b
     ws['A1'] = opts.company
     ws['A1'].font, ws['A1'].alignment = F_TITLE, CENTER
     ws.merge_cells('A2:G2')
-    ws['A2'] = 'تقرير التكاليف — الفعلي مقابل الموازنة'
+    ws['A2'] = 'تقرير التكاليف: الفعلي مقابل الموازنة'
     ws['A2'].font, ws['A2'].alignment = F_SUB, CENTER
     ws.merge_cells('A3:G3')
     ws['A3'] = (f'الفترة: {months[0]:%Y-%m} إلى {months[-1]:%Y-%m}   |   العملة الأساسية: {base}   |   '
@@ -496,7 +496,7 @@ def build_summary(wb, codes, rows, budget, centers, months, opts, bud_tot_col, b
     ws.cell(row=row, column=6, value=f'=IF($C${grand_row}=0,"",E{row}/$C${grand_row})').number_format = FMT_PCT
     style_total(ws, row, 2, 6)
     ws.cell(row=row + 1, column=2,
-            value=f'=IF(ROUND(E{row}-$C${grand_row},0)=0,"✓ مطابق للإجمالي العام","⚠ فرق "&TEXT($C${grand_row}-E{row},"#,##0")&" عن الإجمالي العام: راجع القيود بدون مركز كلفة أو برمز غير معرّف")').font = F_NOTE
+            value=f'=IF(ROUND(E{row}-$C${grand_row},0)=0,"مطابق للإجمالي العام","فرق "&TEXT($C${grand_row}-E{row},"#,##0")&" عن الإجمالي العام: راجع القيود بدون مركز كلفة أو برمز غير معرّف")').font = F_NOTE
 
     # --- حسب الشهر (التشغيلي) ---
     row += 3
@@ -527,7 +527,7 @@ def build_summary(wb, codes, rows, budget, centers, months, opts, bud_tot_col, b
     ws.cell(row=row, column=6, value=f'=IF(D{row}=0,"",C{row}/D{row})').number_format = FMT_PCT
     style_total(ws, row, 2, 6)
     ws.cell(row=row + 1, column=2,
-            value=f'=IF(ROUND(C{row}-C{opex_total},0)=0,"✓ مطابق لإجمالي التشغيلي","⚠ فرق "&TEXT(C{opex_total}-C{row},"#,##0")&" عن إجمالي التشغيلي: راجع القيود خارج الفترة أو برمز غير معرّف")').font = F_NOTE
+            value=f'=IF(ROUND(C{row}-C{opex_total},0)=0,"مطابق لإجمالي التشغيلي","فرق "&TEXT(C{opex_total}-C{row},"#,##0")&" عن إجمالي التشغيلي: راجع القيود خارج الفترة أو برمز غير معرّف")').font = F_NOTE
 
     # --- الرسوم البيانية ---
     if opex:
@@ -573,12 +573,12 @@ def build_method(wb, opts, rows, issues, source_name):
         ('العملة الأساسية', opts.base),
         ('أسعار الصرف المستخدمة', fx_text),
         ('دليل الترميز', 'مبني على هيكل الدليل المحاسبي للنظام المحاسبي الموحد (المستويان الأول والثاني)'),
-        ('نتيجة الفحص', f'أخطاء: {counts[ERROR]}، تحذيرات: {counts[WARNING]}، ملاحظات: {counts[INFO]} — التفاصيل في ورقة "{S_ISSUES}"'),
+        ('نتيجة الفحص', f'أخطاء: {counts[ERROR]}، تحذيرات: {counts[WARNING]}، ملاحظات: {counts[INFO]}، والتفاصيل في ورقة "{S_ISSUES}"'),
         ('الفعلي', 'يشمل الضرائب والرسوم غير المستردة، ومحوّل للعملة الأساسية بسعر صرف تاريخ المعاملة (IAS 21)'),
-        ('الوفر / (التجاوز)', 'الموازنة − الفعلي؛ الأقواس والأحمر = تجاوز'),
+        ('الوفر / (التجاوز)', 'الموازنة ناقص الفعلي؛ الأقواس والأحمر تعني تجاوزاً'),
         ('نسبة الاستخدام', 'الفعلي ÷ الموازنة؛ 90% فأكثر = قريب من الحد'),
         ('الألوان', 'الخط الأزرق = مدخلات تُعدّل يدوياً؛ الخط الأسود = معادلات لا تُكتب فوقها'),
-        ('إضافة قيود', 'أضف الصف داخل جدول السجل وانسخ معادلات الصف السابق، أو أعد بناء الملف من المصدر'),
+        ('إضافة قيود', 'تُضاف القيود داخل جدول السجل مع نسخ معادلات الصف السابق، أو يُعاد بناء الملف من المصدر'),
         ('تاريخ ووقت الإعداد', f'{dt.datetime.now():%Y-%m-%d %H:%M}'),
     ]
     for i, (k, v) in enumerate(items, start=3):
@@ -622,6 +622,24 @@ def recalc_check(path):
         return errors, wb[S_SUMMARY]
 
 
+def house_style_issues(path):
+    """قواعد أسلوب ملفات البركة: بدون رموز تعبيرية أو شرطة طويلة أو [افتراض]، ومنشئ الملف الإدارة المالية."""
+    wb = load_workbook(path)
+    issues = []
+    if wb.properties.creator != 'الإدارة المالية':
+        issues.append(f'منشئ الملف "{wb.properties.creator}" بدل "الإدارة المالية"')
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                v = cell.value
+                if not isinstance(v, str):
+                    continue
+                bad = [ch for ch in v if ch in '—⚠✓✔' or 0x1F000 <= ord(ch) or 0x2600 <= ord(ch) <= 0x27BF]
+                if bad or '[افتراض]' in v:
+                    issues.append(f'{ws.title}!{cell.coordinate}: {"".join(bad) or "[افتراض]"}')
+    return issues
+
+
 def export_pdf(path):
     exe = soffice()
     if not exe:
@@ -635,7 +653,7 @@ def export_pdf(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     common_args(parser)
-    parser.add_argument('--company', required=True, help='اسم الشركة كما يظهر بالتقرير')
+    parser.add_argument('--company', default='شركة البركة للاستثمارات الصناعية', help='اسم الشركة كما يظهر بالتقرير')
     parser.add_argument('--out', required=True, help='مسار ملف xlsx الناتج')
     parser.add_argument('--budget', help='ملف الموازنة CSV')
     parser.add_argument('--prepared-by', help='اسم معدّ التقرير')
@@ -662,7 +680,7 @@ def main():
 
     wb = Workbook()
     wb.remove(wb.active)
-    n_codes_last, n_centers_last, n_cur_last = build_lists(wb, codes, centers or ['—'], currencies)
+    n_codes_last, n_centers_last, n_cur_last = build_lists(wb, codes, centers or ['غير محدد'], currencies)
     build_register(wb, rows, row_issues, opts.base, n_codes_last, n_centers_last, n_cur_last)
     bud_tot_col, bud_total_row = build_budget(wb, codes, budget, months, opts.base)
     build_variance(wb, codes, rows, budget, opts.base, bud_tot_col)
@@ -675,33 +693,39 @@ def main():
     wb.active = 0
     for name in (S_REG, S_BUD, S_VAR, S_ISSUES, S_LISTS):
         page_setup(wb[name], opts.company, '1:1')
-    wb.properties.title = f'تقرير التكاليف — {opts.company}'
-    wb.properties.creator = opts.prepared_by or opts.company
+    wb.properties.title = f'تقرير التكاليف، {opts.company}'
+    wb.properties.creator = 'الإدارة المالية'
+    wb.properties.lastModifiedBy = 'الإدارة المالية'
     wb.properties.subject = 'Cost report: actual vs budget'
 
     out = Path(opts.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     wb.save(out)
     counts = {s: sum(1 for x in issues if x.severity == s) for s in (ERROR, WARNING, INFO)}
-    print(f'تم إنشاء {out} — القيود: {len(rows)} | أخطاء: {counts[ERROR]} | تحذيرات: {counts[WARNING]} | ملاحظات: {counts[INFO]}')
+    print(f'تم إنشاء {out} | القيود: {len(rows)} | أخطاء: {counts[ERROR]} | تحذيرات: {counts[WARNING]} | ملاحظات: {counts[INFO]}')
 
     if opts.check:
+        style = house_style_issues(out)
+        print('أسلوب الملفات: ' + ('سليم' if not style else f'{len(style)} مخالفة'))
+        for s in style[:20]:
+            print('  ', s)
         result = recalc_check(out)
+        errors = []
         if result is None:
-            print('تنبيه: LibreOffice غير متوفر — لم يُفحص الحساب.')
+            print('تنبيه: LibreOffice غير متوفر، لم يُفحص الحساب.')
         else:
             errors, summary = result
-            print('فحص المعادلات: ' + ('لا توجد أخطاء ✓' if not errors else f'{len(errors)} خطأ'))
+            print('فحص المعادلات: ' + ('لا توجد أخطاء' if not errors else f'{len(errors)} خطأ'))
             for e in errors[:30]:
                 print('  ', e)
             for col in range(2, 8):
                 label, value = summary.cell(row=5, column=col).value, summary.cell(row=6, column=col).value
                 print(f'   {label}: {value:,.2f}' if isinstance(value, (int, float)) else f'   {label}: {value}')
-            if errors:
-                sys.exit(2)
+        if errors or style:
+            sys.exit(2)
     if opts.pdf:
         pdf = export_pdf(out)
-        print(f'PDF: {pdf}' if pdf else 'تنبيه: LibreOffice غير متوفر — لم يُصدَّر PDF.')
+        print(f'PDF: {pdf}' if pdf else 'تنبيه: LibreOffice غير متوفر، لم يُصدَّر PDF.')
 
 
 if __name__ == '__main__':
